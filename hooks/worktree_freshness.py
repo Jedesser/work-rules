@@ -34,7 +34,7 @@ def main() -> int:
         return 0
 
     project = G.project_dir()
-    code, _out = G.git(["fetch", "origin", "--prune"], project, timeout=25)
+    code, _out = G.git(["fetch", "origin", "--prune"], project, timeout=25, cache=False)
     if code != 0:
         return G.advise(
             "⚠️ Не удалось обновить состояние удалённого репозитория перед созданием "

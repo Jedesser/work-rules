@@ -16,6 +16,12 @@
 Включается заданием shared_checkout в gates.config.json. Не задан —
 проверка выключена.
 
+Направление отказа — ОТКРЫТОЕ, и это осознанный компромисс: правка файла не
+уничтожает работу необратимо (её видно в истории и в diff), а перехватчик,
+который ломает редактирование из-за собственной ошибки, будет выключен в тот
+же день. Если для вас цена смешения копий выше — поменяйте последний блок на
+выход с кодом 2.
+
 Регистрация: PreToolUse, matcher "Edit|Write|MultiEdit|NotebookEdit".
 """
 
@@ -35,9 +41,17 @@ FILE_FIELDS = {
 }
 
 
-def normalize(path: str) -> str:
+def normalize(path: str, base: str | None = None) -> str:
+    """Разыменовывает путь. Относительный считается от каталога сессии.
+
+    Каталог берётся из полезной нагрузки хука, а не из собственного текущего
+    каталога процесса: перехватчик запускается рантаймом откуда угодно, и
+    относительный путь, посчитанный от его каталога, указал бы не туда.
+    """
     if not path:
         return ""
+    if base and not os.path.isabs(path):
+        path = os.path.join(base, path)
     try:
         return os.path.realpath(path)
     except OSError:
@@ -66,7 +80,7 @@ def main() -> int:
     if not raw:
         return 0
 
-    resolved = normalize(raw)
+    resolved = normalize(raw, data.get("cwd"))
     if not is_under(resolved, normalize(shared)):
         return 0
 
