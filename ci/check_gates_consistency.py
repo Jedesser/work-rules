@@ -256,6 +256,32 @@ def main() -> int:
                 "tool_name": "Bash", "cwd": str(allflag),
                 "tool_input": {"command": form}}, allflag)
             check(f"с пустым индексом {form!r} всё равно проверяется", code == 2)
+        # Псевдоним — это та же команда, записанная своим словом. Гейт,
+        # знающий только `commit`, пропускает `git ci` при `alias.ci = commit`.
+        alias_repo = make_repo(tmp, "aliased")
+        write_config(alias_repo)
+        git(["config", "alias.ci", "commit"], alias_repo)
+        git(["config", "alias.rb", "rebase"], alias_repo)
+        (alias_repo / "critical").mkdir()
+        (alias_repo / "critical" / "a.txt").write_text("x\n")
+        git(["add", "critical/a.txt"], alias_repo)
+        code, _o, _e = run_hook("commit_gate.py", {
+            "tool_name": "Bash", "cwd": str(alias_repo),
+            "tool_input": {"command": "git ci -m x"}}, alias_repo)
+        check("псевдоним коммита проверяется гейтом", code == 2, f"вернул {code}")
+        code, _o, _e = run_hook("guard_bash.py", {
+            "tool_name": "Bash", "cwd": str(alias_repo),
+            "tool_input": {"command": "git rb main"}}, alias_repo)
+        check("псевдоним запрещённой команды блокируется", code == 2, f"вернул {code}")
+        code, _o, _e = run_hook("guard_bash.py", {
+            "tool_name": "Bash", "cwd": str(alias_repo),
+            "tool_input": {"command": "git -c alias.zz=rebase zz main"}}, alias_repo)
+        check("псевдоним прямо в команде тоже раскрывается", code == 2, f"вернул {code}")
+        code, _o, err = run_hook("guard_bash.py", {
+            "tool_name": "Bash", "cwd": str(alias_repo),
+            "tool_input": {"command": "git st"}}, alias_repo)
+        check("неизвестное слово без псевдонима не мешает работе", code == 0, err[:120])
+
         # Сообщение, начинающееся с дефиса, — не флаг «взять всё».
         code, _o, _e = run_hook("commit_gate.py", {
             "tool_name": "Bash", "cwd": str(allflag),

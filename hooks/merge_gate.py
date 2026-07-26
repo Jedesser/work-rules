@@ -130,7 +130,8 @@ def check_target(segment: str, work_dir: str) -> int:
         )
 
     branch = G.current_branch(work_dir)
-    head = _pr_head(target, work_dir)
+    resolved = _pr_head(target, work_dir)
+    head = resolved[0] if resolved else None
     if head is None:
         return G.block(
             f"🛑 Гейт мержа: не удалось выяснить, какая ветка стоит за «{target}».\n\n"
@@ -148,20 +149,34 @@ def check_target(segment: str, work_dir: str) -> int:
             "распространяется.\n\n"
             "Перейдите в рабочую копию того PR и слейте его оттуда."
         )
+
+    # Ветка та же — но вершина у неё может быть чужая: другая копия успела
+    # запушить, и расписка описывает дифф, которого в PR уже нет.
+    _code, local = G.git(["rev-parse", "HEAD"], work_dir)
+    if local.strip() and resolved[1] and local.strip() != resolved[1]:
+        return G.block(
+            "🛑 Гейт мержа: удалённая ветка PR ушла вперёд проверенной копии.\n\n"
+            f"  Здесь:    {local.strip()[:12]}\n"
+            f"  В PR:     {resolved[1][:12]}\n\n"
+            "Расписки описывают дифф ЭТОЙ копии, а сольётся то, что лежит в PR. "
+            "Заберите чужие коммиты (`git fetch` + `git merge`), прогоните ревью "
+            "заново и повторите."
+        )
     return 0
 
 
-def _pr_head(target: str, work_dir: str) -> str | None:
-    """Имя ветки-источника указанного PR. None — выяснить не удалось."""
+def _pr_head(target: str, work_dir: str) -> tuple[str, str] | None:
+    """Ветка-источник указанного PR и её вершина. None — выяснить не удалось."""
     try:
         proc = subprocess.run(
-            ["gh", "pr", "view", target, "--json", "headRefName", "-q", ".headRefName"],
+            ["gh", "pr", "view", target, "--json", "headRefName,headRefOid",
+             "-q", ".headRefName + \" \" + .headRefOid"],
             cwd=work_dir, capture_output=True, text=True, timeout=20,
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    name = proc.stdout.strip()
-    return name if proc.returncode == 0 and name else None
+    parts = proc.stdout.split()
+    return (parts[0], parts[1]) if proc.returncode == 0 and len(parts) == 2 else None
 
 
 def check_tree(work_dir: str, command: str, cfg: dict) -> int:
