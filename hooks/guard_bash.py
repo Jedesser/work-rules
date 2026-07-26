@@ -179,6 +179,29 @@ def _has_letter(tok: str, letter: str) -> bool:
     return tok.startswith("-") and not tok.startswith("--") and letter in tok[1:]
 
 
+# Приставки git-овских путей, означающие «от корня репозитория».
+PATHSPEC_ROOT_PREFIXES = (":(top)", ":(glob)", ":/")
+
+
+def _adds_everything(tok: str) -> bool:
+    """Забирает ли этот аргумент `git add` всё дерево целиком.
+
+    Записей у одного и того же действия много: `.`, `*`, `:/`, `:(top)`,
+    `:/*`. Отличать их надо от НАСТОЯЩЕГО пути от корня (`:/docs/readme.md`) —
+    это обычное поимённое добавление, и запрещать его значит мешать работе.
+    Признак простой: после приставки не осталось ничего, кроме звёздочек,
+    точек и косых.
+    """
+    a = tok.strip("'\"")
+    if a in ("--all", "--no-ignore-removal"):
+        return True
+    for prefix in PATHSPEC_ROOT_PREFIXES:
+        if a.startswith(prefix):
+            a = a[len(prefix):]
+            break
+    return bool(tok) and a.strip("*./") == ""
+
+
 def check_git(parsed: dict, main_branch: str, work_dir) -> str | None:
     """work_dir передаётся ЛЕНИВО (вызываемым объектом): он нужен одной ветке
     проверки, а его вычисление стоит запуска git."""
@@ -242,13 +265,8 @@ def check_git(parsed: dict, main_branch: str, work_dir) -> str | None:
                 f"git отправит текущую ветку, то есть прямо в основную.\n"
                 "Всё попадает в основную ветку только через PR и его проверки."
             )
-    # `:/`, `:(top)` — «всё от корня репозитория», `*` — глоб, который
-    # раскрывает сам git. Все три делают ровно то же, что `-A`.
-    # Сравнение ТОЧНОЕ: `:/путь/файл` — это конкретный файл от корня, и
-    # отбивать его сообщением про «добавить всё» значит мешать обычной работе.
     if sub in ("add", "stage") and any(
-        a.strip("'\"") in ("--all", "--no-ignore-removal", ".", ":/", ":/.",
-                           ":(top)", "*") or _has_letter(a, "A") for a in args
+        _adds_everything(a) or _has_letter(a, "A") for a in args
     ):
         return (
             "🛑 `git add -A` / `git add .` запрещены.\n"
