@@ -22,7 +22,12 @@
 же день. Если для вас цена смешения копий выше — поменяйте последний блок на
 выход с кодом 2.
 
-Регистрация: PreToolUse, matcher "Edit|Write|MultiEdit|NotebookEdit".
+Оболочка проверяется наравне с редактором. Иначе изоляция держится на том,
+что агент ДОБРОВОЛЬНО выбрал инструмент правки: `cat > файл`, `cp`, любой
+форматтер или генератор кода из оболочки пишут в ту же общую копию, а
+запрет на редактор при этом создаёт впечатление работающей защиты.
+
+Регистрация: PreToolUse, matcher "Edit|Write|MultiEdit|NotebookEdit|Bash".
 """
 
 from __future__ import annotations
@@ -64,17 +69,103 @@ def is_under(target: str, root: str) -> bool:
     return target == root or target.startswith(root + os.sep)
 
 
+# Команды, которые пишут в файловую систему. Список нарочно короткий и
+# состоит из того, чем правят код и файлы проекта: длинный список из всего,
+# что теоретически умеет писать, ловил бы обычное чтение и был бы выключен.
+WRITING_COMMANDS = {
+    "cp", "mv", "rm", "rmdir", "mkdir", "touch", "install", "dd", "truncate",
+    "ln", "chmod", "chown", "tee", "patch", "rsync", "unzip", "tar",
+}
+# Подкоманды git, меняющие рабочее дерево. `git commit` сюда не входит: он
+# меняет историю, а не файлы, и у него свой гейт.
+WRITING_GIT = {"checkout", "switch", "restore", "apply", "stash", "clean",
+               "reset", "merge", "pull", "cherry-pick", "revert", "am"}
+REDIRECT_TOKENS = (">", ">>", ">|")
+
+
+def bash_targets(command: str, base: str) -> list[tuple[str, str]]:
+    """Что эта команда собирается изменить: пары «описание, путь».
+
+    Смотрятся две вещи: КАТАЛОГ, в котором сегмент выполнится (`cd` учтён),
+    и явные пути в перенаправлениях и аргументах пишущих команд. Одного
+    каталога мало — писать в общую копию можно и абсолютным путём откуда
+    угодно.
+    """
+    found: list[tuple[str, str]] = []
+    for segment, seg_dir in G.segments_with_dirs(command, base):
+        tokens = G.tokenize(segment)
+        if not tokens:
+            continue
+        peeled, _env = G.peel_wrappers(tokens)
+        if not peeled:
+            continue
+        name = os.path.basename(peeled[0])
+        parsed = G.parse_git(tokens)
+
+        writes = name in WRITING_COMMANDS
+        if parsed and parsed.get("subcommand") in WRITING_GIT:
+            writes = True
+            seg_dir = G.git_dash_c_dir(parsed) or seg_dir
+
+        # Перенаправление пишет независимо от того, что за команда слева.
+        for i, tok in enumerate(tokens):
+            for op in REDIRECT_TOKENS:
+                if tok == op and i + 1 < len(tokens):
+                    found.append((f"перенаправление {op}", normalize(tokens[i + 1], seg_dir)))
+                elif tok.startswith(op) and len(tok) > len(op):
+                    found.append((f"перенаправление {op}", normalize(tok[len(op):], seg_dir)))
+
+        if not writes:
+            continue
+        # Проверяются ИМЕННО пути аргументов, а не каталог сегмента: `rm /tmp/x`
+        # из общей копии ничего в ней не меняет, и отказ на нём — ложный.
+        # Относительный путь normalize() и так привяжет к каталогу сегмента.
+        targets = [a for a in peeled[1:] if not a.startswith("-")]
+        if parsed:
+            targets = [a for a in parsed.get("args", []) if not a.startswith("-")]
+            # `git checkout` без путей меняет всё дерево целиком.
+            if not targets:
+                found.append((f"`git {parsed['subcommand']}` меняет дерево", normalize(seg_dir)))
+        for arg in targets:
+            found.append((f"аргумент `{name}`", normalize(arg, seg_dir)))
+    return found
+
+
+def check_bash(data: dict, cfg: dict, shared_root: str) -> int:
+    command = str((data.get("tool_input") or {}).get("command") or "")
+    if not command:
+        return 0
+    base = str(data.get("cwd") or "")
+    for what, path in bash_targets(command, base):
+        if is_under(path, shared_root):
+            return G.block(
+                "🛑 Запись в общую копию репозитория из оболочки запрещена.\n"
+                f"  Что пишет:     {what}\n"
+                f"  Цель:          {path}\n\n"
+                "Запрет на редактор без запрета на оболочку — видимость защиты: "
+                "`cat > файл`, `cp`, форматтер или генератор кода пишут в ту же "
+                "общую копию.\n\n"
+                "Заведите свою рабочую копию и работайте в ней:\n"
+                f"  git -C {cfg['shared_checkout']} worktree add -b <ветка> "
+                f"<путь-рядом> {cfg['base_ref']}"
+            )
+    return 0
+
+
 def main() -> int:
     data = G.read_hook_input()
     tool = str(data.get("tool_name") or "")
     field = FILE_FIELDS.get(tool)
-    if field is None:
+    if field is None and tool != "Bash":
         return 0
 
     cfg = G.load_config()
     shared = cfg.get("shared_checkout")
     if not shared:
         return 0
+
+    if tool == "Bash":
+        return check_bash(data, cfg, normalize(shared))
 
     raw = str((data.get("tool_input") or {}).get(field) or "")
     if not raw:

@@ -32,9 +32,10 @@
         ]
       },
       {
-        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "_comment": "Оболочка здесь наравне с редактором: без неё изоляция копий держится на том, что агент ДОБРОВОЛЬНО выбрал инструмент правки, а `cat > файл` и `cp` пишут в ту же общую копию.",
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
         "hooks": [
-          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/worktree_guard.py", "timeout": 5 }
+          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/worktree_guard.py", "timeout": 10 }
         ]
       },
       {
