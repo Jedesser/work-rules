@@ -28,10 +28,6 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 import gatelib as G  # noqa: E402
 
-VALUE_FLAGS = {"-b", "--body", "-F", "--body-file", "-t", "--title", "-B", "--base",
-               "-H", "--head", "-l", "--label", "-a", "--assignee", "-r", "--reviewer",
-               "-R", "--repo", "-m", "--milestone", "-p", "--project", "-T", "--template"}
-
 
 def main() -> int:
     data = G.read_hook_input()
@@ -42,7 +38,10 @@ def main() -> int:
         return 0
 
     cfg = G.load_config()
-    if not any(re.search(p, command) for p in cfg["pr_create_patterns"]):
+    # Совпадение от начала сегмента: `gh  pr create` с двумя пробелами не
+    # должен проходить мимо, а `echo "gh pr create"` — блокироваться.
+    hits = G.invocations(command, cfg["pr_create_patterns"])
+    if not hits:
         return 0
 
     work_dir = G.resolve_work_dir(data.get("cwd"))
@@ -54,7 +53,7 @@ def main() -> int:
     if len(files) <= cfg["issue_gate_min_files"]:
         return 0
 
-    body = extract_body(command, work_dir)
+    body = extract_body(hits, work_dir)
     if body is None:
         # Описание не удалось прочитать — падаем ЗАКРЫТО и просим указать
         # ссылку явно. Иначе гейт обходится любой непонятной формой вызова.
@@ -77,12 +76,10 @@ def main() -> int:
     )
 
 
-def extract_body(command: str, work_dir: str) -> str | None:
+def extract_body(segments: list[str], work_dir: str) -> str | None:
     """Достаёт описание PR из команды: --body, --body-file или --fill."""
-    for segment in G.split_segments(command):
-        tokens = G.tokenize(segment)
-        if not any(re.search(p, segment) for p in G.load_config()["pr_create_patterns"]):
-            continue
+    for segment in segments:
+        tokens, _env = G.peel_wrappers(G.tokenize(segment))
         i = 0
         while i < len(tokens):
             tok = tokens[i]

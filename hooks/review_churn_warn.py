@@ -43,8 +43,11 @@ def main() -> int:
         return 0
 
     # Фоновый запуск расписку не выписывает и повторного гейта не стоит —
-    # предупреждать о нём значит шуметь.
-    if tool_input.get("run_in_background") is not False:
+    # предупреждать о нём значит шуметь. Проверка именно на явное True:
+    # отсутствующее поле трактовать как фоновый запуск нельзя, иначе
+    # предупреждение молчит в самом частом случае — а это ровно тот случай,
+    # ради которого оно написано.
+    if tool_input.get("run_in_background") is True:
         return 0
 
     name = G.detect_subagent(tool_input)
@@ -75,7 +78,7 @@ def _distinct_prior(branch_dir: str, name: str) -> int:
     except OSError:
         return 0
     for fname in entries:
-        if not fname.startswith(f"{name}-"):
+        if not G.receipt_belongs_to(fname, name):
             continue
         full = os.path.join(branch_dir, fname)
         try:

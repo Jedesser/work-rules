@@ -45,7 +45,7 @@ def main() -> int:
         return 0
 
     is_commit = False
-    for segment in G.split_segments(command):
+    for segment in G.expand_segments(command):
         parsed = G.parse_git(G.tokenize(segment))
         if parsed and parsed.get("subcommand") == "commit":
             is_commit = True
