@@ -19,6 +19,8 @@
 from __future__ import annotations
 
 import os
+import re
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
@@ -45,11 +47,75 @@ def main() -> int:
     # Каталог берётся у самого сегмента: `cd <другая копия> && gh pr merge`
     # мержит ветку ТОЙ копии, и проверять дифф сессионной — значит смотреть
     # не на тот код.
-    for _segment, seg_dir in hits:
-        code = check_tree(G.resolve_work_dir(seg_dir), command, cfg)
+    for segment, seg_dir in hits:
+        work_dir = G.resolve_work_dir(seg_dir)
+        code = check_target(segment, work_dir)
+        if code:
+            return code
+        code = check_tree(work_dir, command, cfg)
         if code:
             return code
     return 0
+
+
+PR_TARGET_RE = re.compile(r"^(\d+|https?://\S+)$")
+
+
+def check_target(segment: str, work_dir: str) -> int:
+    """Мержится ли ИМЕННО та ветка, дифф которой проверил гейт.
+
+    `gh pr merge 123` сольёт чужой PR, а гейт посчитает файлы, красную зону и
+    расписки по текущей ветке — то есть валидная расписка на свою работу
+    авторизует мерж чужой, никем не смотренной. Поэтому явно названная цель
+    сверяется с веткой проверенного дерева.
+
+    Проверка падает ЗАКРЫТО: не удалось выяснить, чья это ветка, — отказ. Это
+    граница попадания кода в основную ветку, и «наверное, та самая» здесь не
+    аргумент.
+    """
+    tokens, _env = G.peel_wrappers(G.tokenize(segment))
+    targets = [t for i, t in enumerate(tokens)
+               if i > 0 and not t.startswith("-") and PR_TARGET_RE.match(t)]
+    if not targets:
+        return 0        # цель не названа — сольётся PR текущей ветки
+
+    branch = G.current_branch(work_dir)
+    code, _top = G.git(["rev-parse", "--show-toplevel"], work_dir)
+    if code != 0:
+        return G.block("🛑 Гейт мержа: не удалось определить рабочую копию.")
+
+    head = _pr_head(targets[0], work_dir)
+    if head is None:
+        return G.block(
+            f"🛑 Гейт мержа: не удалось выяснить, какая ветка стоит за «{targets[0]}».\n\n"
+            "Гейт считает файлы, критические пути и расписки по ТЕКУЩЕЙ ветке. Если "
+            "команда сливает другой PR, расписка на свою работу авторизовала бы "
+            "мерж чужой, никем не смотренной.\n\n"
+            "Слейте PR из его собственной рабочей копии — без явного номера."
+        )
+    if head != branch:
+        return G.block(
+            f"🛑 Гейт мержа: сливается не та ветка, дифф которой проверен.\n\n"
+            f"  Проверено:  {branch} (дерево {work_dir})\n"
+            f"  Сливается:  {head} (цель «{targets[0]}»)\n\n"
+            "Расписка привязана к диффу проверенного дерева и на чужой PR не "
+            "распространяется.\n\n"
+            "Перейдите в рабочую копию того PR и слейте его оттуда."
+        )
+    return 0
+
+
+def _pr_head(target: str, work_dir: str) -> str | None:
+    """Имя ветки-источника указанного PR. None — выяснить не удалось."""
+    try:
+        proc = subprocess.run(
+            ["gh", "pr", "view", target, "--json", "headRefName", "-q", ".headRefName"],
+            cwd=work_dir, capture_output=True, text=True, timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    name = proc.stdout.strip()
+    return name if proc.returncode == 0 and name else None
 
 
 def check_tree(work_dir: str, command: str, cfg: dict) -> int:

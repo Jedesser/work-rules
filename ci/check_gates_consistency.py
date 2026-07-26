@@ -399,14 +399,19 @@ def main() -> int:
         # тест отчитывался бы об успехе, ничего не проверив.
         for reviewer in ("change-reviewer", "critical-zone-reviewer"):
             run_hook("subagent_receipt.py", reviewer_payload(repo, name=reviewer), repo)
+        # Без номера PR: цель — ветка текущего дерева, и гейт доходит до
+        # проверки самого диффа. Сверка явно названного PR проверяется ниже.
         red_payload = {"tool_name": "Bash", "cwd": str(repo),
-                       "tool_input": {"command": "MERGE_REVIEW_DONE=1 gh pr merge 1 --merge"}}
+                       "tool_input": {"command": "MERGE_REVIEW_DONE=1 gh pr merge --merge"}}
         code, _o, err = run_hook("merge_gate.py", red_payload, repo)
         check("мерж красной зоны не проходит автоматически", code == 2, err[:200])
-        check("отказ ссылается именно на красную зону", "красную зону" in err, err[:200])
+        # Проверяется НАЗВАННЫЙ путь, а не слово «красная зона»: слово может
+        # встретиться в тексте любого другого отказа, и проверка станет зелёной
+        # по неверной причине — так этот тест однажды и молчал.
+        check("отказ называет файл красной зоны", "money/billing.txt" in err, err[:200])
         code, _o, err = run_hook("merge_gate.py", {
             "tool_name": "Bash", "cwd": str(repo),
-            "tool_input": {"command": "gh  pr  merge 1 --merge"}}, repo)
+            "tool_input": {"command": "gh  pr  merge --merge"}}, repo)
         check("лишние пробелы не проносят мерж мимо гейта", code == 2, err[:120])
         code, _o, err = run_hook("merge_gate.py", {
             "tool_name": "Bash", "cwd": str(repo),
@@ -421,6 +426,14 @@ def main() -> int:
             "tool_name": "Bash", "cwd": str(repo),
             "tool_input": {"command": "gh api -X PUT repos/o/r/pulls/1/merge"}}, repo)
         check("мерж через сырой вызов API тоже под гейтом", code == 2, f"вернул {code}")
+        # Явно названный PR: гейт считает дифф по ТЕКУЩЕЙ ветке, поэтому обязан
+        # убедиться, что сливается именно она. Выяснить не удалось — отказ.
+        write_config(repo)
+        code, _o, err = run_hook("merge_gate.py", {
+            "tool_name": "Bash", "cwd": str(repo),
+            "tool_input": {"command": "MERGE_REVIEW_DONE=1 gh pr merge 12345 --merge"}}, repo)
+        check("мерж чужого PR по номеру не проходит по своей расписке",
+              code == 2 and "какая ветка стоит" in err, err[:160])
         write_config(repo)
 
         print("\n8. Предполётная проверка ревьюера")
@@ -761,6 +774,25 @@ def main() -> int:
             "tool_name": "Edit", "cwd": str(shared),
             "tool_input": {"file_path": "README.md"}}, repo)
         check("относительный путь считается от каталога сессии", code == 2)
+        # Оболочка обязана проверяться наравне с редактором: иначе изоляция
+        # держится на том, что агент ДОБРОВОЛЬНО выбрал инструмент правки.
+        for label, cmd, cwd, expect in (
+            ("перенаправление в общую копию", f"cat > {shared}/x.txt", mine, 2),
+            ("перенаправление >> в общую копию", f"echo x >> {shared}/x.txt", mine, 2),
+            ("копирование в общую копию", f"cp /tmp/x.txt {shared}/x.txt", mine, 2),
+            ("запись из каталога общей копии", "cat > x.txt", shared, 2),
+            ("переключение ветки в общей копии", "git checkout main", shared, 2),
+            ("правка через `git -C` в общей копии", f"git -C {shared} restore .", mine, 2),
+            ("удаление в общей копии", f"rm {shared}/x.txt", mine, 2),
+            ("чтение в общей копии разрешено", "git status", shared, 0),
+            ("поиск в общей копии разрешён", f"grep -rn foo {shared}", mine, 0),
+            ("запись в своей копии разрешена", f"cat > {mine}/x.txt", mine, 0),
+            ("удаление вне копий из её каталога разрешено", "rm /tmp/x.txt", shared, 0),
+        ):
+            code, _o, err = run_hook("worktree_guard.py", {
+                "tool_name": "Bash", "cwd": str(cwd),
+                "tool_input": {"command": cmd}}, repo)
+            check(f"{label}: {cmd[:40]!r}", code == expect, f"вернул {code} {err[:100]}")
 
     print("\n15. Регистрация перехватчика переживает свой худший случай")
     # Если рантайм убьёт перехватчик по своему таймауту раньше, чем тот успеет
