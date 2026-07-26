@@ -874,7 +874,32 @@ def expand_segments(cmd: str, depth: int = 0) -> list[str]:
     return out
 
 
-def invocations(command: str, patterns: list[str]) -> list[str]:
+def segments_with_dirs(command: str, base_dir: str) -> list[tuple[str, str]]:
+    """Каждый сегмент вместе с каталогом, в котором он РЕАЛЬНО выполнится.
+
+    `cd` внутри команды меняет дерево для всего, что идёт после него. Гейт,
+    который берёт каталог только из полезной нагрузки хука, этого не видит —
+    и `cd ../соседняя-копия && git commit` он проверяет по дереву сессии,
+    то есть выносит вердикт про совсем другой дифф. А `cd <копия> && git
+    commit` — обычный способ добраться до соседней рабочей копии, не экзотика.
+    """
+    out: list[tuple[str, str]] = []
+    current = base_dir
+    for top in split_segments(command):
+        peeled, _env = peel_wrappers(tokenize(top))
+        if peeled and os.path.basename(peeled[0]) == "cd":
+            args = [a for a in peeled[1:] if not a.startswith("-")]
+            if args:
+                target = args[0] if os.path.isabs(args[0]) else os.path.join(current, args[0])
+                if os.path.isdir(target):
+                    current = os.path.realpath(target)
+            continue
+        for seg in expand_segments(top):
+            out.append((seg, current))
+    return out
+
+
+def invocations(command: str, patterns: list[str], base_dir: str = "") -> list[tuple[str, str]]:
     """Сегменты, в которых команда РЕАЛЬНО вызывается, а не просто упомянута.
 
     Совпадение ищется от начала сегмента (после снятия присваиваний и слов-
@@ -883,14 +908,14 @@ def invocations(command: str, patterns: list[str]) -> list[str]:
     безобидное `echo "gh pr merge"` — блокируется. Первое опаснее, второе
     быстрее приводит к тому, что защиту выключают.
     """
-    hits: list[str] = []
-    for seg in expand_segments(command):
+    hits: list[tuple[str, str]] = []
+    for seg, seg_dir in segments_with_dirs(command, base_dir):
         peeled, _env = peel_wrappers(tokenize(seg))
         if not peeled:
             continue
         head = " ".join([os.path.basename(peeled[0]), *peeled[1:]])
         if any(re.match(p, head) for p in patterns):
-            hits.append(seg)
+            hits.append((seg, seg_dir))
     return hits
 
 

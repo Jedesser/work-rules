@@ -64,9 +64,11 @@ def main() -> int:
     # явной ветки), а его вычисление — это вызов git. Считать его на КАЖДЫЙ
     # вызов Bash значит платить запуском процесса за команды, в которых
     # никакого git нет вовсе.
-    session_cwd = data.get("cwd")
+    session_cwd = str(data.get("cwd") or "")
 
-    for segment in G.expand_segments(command):
+    # Сегменты идут с каталогом, в котором выполнятся: `cd <другая копия> &&
+    # git push` спрашивает про ветку ТОЙ копии.
+    for segment, seg_dir in G.segments_with_dirs(command, session_cwd):
         tokens = G.tokenize(segment)
         if not tokens:
             continue
@@ -85,8 +87,8 @@ def main() -> int:
             target = G.git_dash_c_dir(parsed)
             verdict = check_git(
                 parsed, main_branch,
-                lambda t=target: G.resolve_work_dir(
-                    t if t and os.path.isdir(t) else session_cwd))
+                lambda t=target, d=seg_dir: G.resolve_work_dir(
+                    t if t and os.path.isdir(t) else d))
             if verdict:
                 return G.block(verdict)
 
@@ -143,6 +145,35 @@ def _push_refspecs(args: list[str]) -> list[str]:
     return positional[1:]
 
 
+def _refspec_targets(refspecs: list[str], current: str) -> tuple[list[str], bool]:
+    """Во что реально попадёт отправка — и нет ли принудительности в самой записи.
+
+    Одна и та же ветка пишется пятью способами, и запрет, знающий только два из
+    них, выглядит рабочим, оставаясь дырявым:
+
+      main · HEAD:main · refs/heads/main · +main (это force!) · HEAD (с main)
+
+    `+` перед источником — полноценный `--force`, только записанный так, что
+    флага в команде нет вовсе.
+    """
+    targets: list[str] = []
+    forced = False
+    for spec in refspecs:
+        s = spec
+        if s.startswith("+"):
+            forced = True
+            s = s[1:]
+        dst = s.split(":", 1)[1] if ":" in s else s
+        for prefix in ("refs/heads/", "heads/"):
+            if dst.startswith(prefix):
+                dst = dst[len(prefix):]
+                break
+        if dst in ("HEAD", "@") and current:
+            dst = current
+        targets.append(dst)
+    return targets, forced
+
+
 def _has_letter(tok: str, letter: str) -> bool:
     """Есть ли буква среди ОДНОБУКВЕННЫХ флагов связки: `-fu`, `-Av`, `-f`."""
     return tok.startswith("-") and not tok.startswith("--") and letter in tok[1:]
@@ -183,15 +214,26 @@ def check_git(parsed: dict, main_branch: str, work_dir) -> str | None:
                 "Всё попадает в основную ветку только через PR и его проверки."
             )
         refspecs = _push_refspecs(args)
-        # `git push origin main` / `git push origin HEAD:main`
-        if any(a == main_branch or a.endswith(f":{main_branch}") for a in refspecs):
-            return (
-                f"🛑 Прямая отправка в `{main_branch}` запрещена.\n"
-                "Всё попадает в основную ветку только через PR и его проверки."
-            )
+        if refspecs:
+            # Текущая ветка нужна только чтобы раскрыть `HEAD`; в остальных
+            # записях она не участвует, и вызывать git ради неё незачем.
+            current = G.current_branch(work_dir()) if any(
+                r.lstrip("+").split(":")[-1] in ("HEAD", "@") for r in refspecs) else ""
+            targets, forced = _refspec_targets(refspecs, current)
+            if forced:
+                return (
+                    "🛑 Принудительная отправка запрещена.\n"
+                    "`+` перед ссылкой — это тот же `--force`, только без флага: "
+                    "он так же молча уничтожает чужие коммиты."
+                )
+            if main_branch in targets:
+                return (
+                    f"🛑 Прямая отправка в `{main_branch}` запрещена.\n"
+                    "Всё попадает в основную ветку только через PR и его проверки."
+                )
         # Без явной ветки git отправляет текущую — самая частая форма записи,
         # и раньше именно она проходила мимо запрета.
-        if not refspecs and G.current_branch(work_dir()) == main_branch:
+        elif G.current_branch(work_dir()) == main_branch:
             return (
                 f"🛑 Отправка без явной ветки из `{main_branch}` запрещена — "
                 f"git отправит текущую ветку, то есть прямо в основную.\n"
@@ -211,7 +253,7 @@ def check_git(parsed: dict, main_branch: str, work_dir) -> str | None:
             "🛑 `git reset --hard` запрещён — необратимо уничтожает несохранённую работу.\n"
             "Если нужно отступить: `git stash`, либо новый коммит с откатом."
         )
-    if sub == "clean" and any(a.startswith("-") and "f" in a for a in args):
+    if sub == "clean" and any(a == "--force" or _has_letter(a, "f") for a in args):
         return (
             "🛑 `git clean -f` запрещён — удаляет файлы, о которых git не знает "
             "(в том числе локальные наработки другого агента или человека)."
