@@ -249,6 +249,17 @@ def main() -> int:
             "tool_name": "Bash", "cwd": str(allflag),
             "tool_input": {"command": "git commit -m '-a быстрая правка'"}}, allflag)
         check("сообщение с дефисом не читается как флаг -a", code == 0)
+        # В связке `-sm` значение забирает последняя буква. Без этого сообщение
+        # коммита читается как путь, гейт считает файлы всего дерева и
+        # отказывает по причине, которой в команде нет.
+        code, _o, _e = run_hook("commit_gate.py", {
+            "tool_name": "Bash", "cwd": str(allflag),
+            "tool_input": {"command": "git commit -sm 'обычное сообщение'"}}, allflag)
+        check("связка -sm: сообщение не считается путём", code == 0)
+        code, _o, _e = run_hook("commit_gate.py", {
+            "tool_name": "Bash", "cwd": str(allflag),
+            "tool_input": {"command": "git commit -sm x critical/a.txt"}}, allflag)
+        check("путь после связки -sm гейт всё же видит", code == 2)
 
         print("\n5. Расписку нельзя потратить на файл, которого ревьюер не видел")
         run_hook("subagent_receipt.py", reviewer_payload(repo), repo)
@@ -341,6 +352,32 @@ def main() -> int:
         check("`git -C` проверяет указанное дерево, а не дерево сессии",
               code == 0, err[:160])
 
+        # `cd` внутри команды — тот же перенос в другое дерево, только без
+        # флага. Гейт, берущий каталог из полезной нагрузки, смотрел бы дифф
+        # чистой сессионной копии и пропускал коммит в критическую.
+        src = make_repo(tmp, "switch-src")
+        write_config(src)
+        dst = make_repo(tmp, "switch-dst")
+        write_config(dst)
+        (dst / "critical").mkdir()
+        (dst / "critical" / "deploy.yaml").write_text("x\n")
+        git(["add", "critical/deploy.yaml"], dst)
+        code, _o, err = run_hook("commit_gate.py", {
+            "tool_name": "Bash", "cwd": str(src),
+            "tool_input": {"command": f"cd {dst} && git commit -m x"}}, src)
+        check("`cd <дерево> && git commit` проверяет то дерево, куда перешли",
+              code == 2, f"вернул {code}")
+        code, _o, err = run_hook("commit_gate.py", {
+            "tool_name": "Bash", "cwd": str(dst),
+            "tool_input": {"command": f"cd {src} && git commit -m x"}}, dst)
+        check("переход в чистое дерево не блокируется задним числом",
+              code == 0, err[:160])
+        code, _o, err = run_hook("merge_gate.py", {
+            "tool_name": "Bash", "cwd": str(src),
+            "tool_input": {"command": f"cd {dst} && gh pr merge 1 --merge"}}, src)
+        check("`cd <дерево> && gh pr merge` проверяет то дерево, куда перешли",
+              code == 2, f"вернул {code}")
+
         print("\n7. Красная зона требует человека даже при валидных расписках")
         (repo / "money").mkdir()
         (repo / "money" / "billing.txt").write_text("x\n")
@@ -363,6 +400,16 @@ def main() -> int:
             "tool_name": "Bash", "cwd": str(repo),
             "tool_input": {"command": 'echo "gh pr merge 1 --merge"'}}, repo)
         check("упоминание мержа в тексте гейт не трогает", code == 0, err[:200])
+        # Мерж через сырой вызов API — та же операция другой записью, и
+        # образцовый конфиг обязан её знать: иначе гейт обходится одной строкой.
+        write_config(repo, {"red_zone_paths": ["^money/"], "pr_merge_patterns":
+                            json.loads((ROOT / "config.example.json").read_text(
+                                encoding="utf-8"))["pr_merge_patterns"]})
+        code, _o, err = run_hook("merge_gate.py", {
+            "tool_name": "Bash", "cwd": str(repo),
+            "tool_input": {"command": "gh api -X PUT repos/o/r/pulls/1/merge"}}, repo)
+        check("мерж через сырой вызов API тоже под гейтом", code == 2, f"вернул {code}")
+        write_config(repo)
 
         print("\n8. Предполётная проверка ревьюера")
         clean = tmp / "clean"
@@ -447,6 +494,16 @@ def main() -> int:
             "git stage -A",
             # Незакрытый вложенный документ ничего не прячет.
             "cat > f <<'EOF'\ngit rebase main",
+            # Одна и та же ветка пятью записями. Запрет, знающий две из них,
+            # выглядит рабочим и не работает.
+            "git push origin HEAD:main",
+            "git push origin refs/heads/main",
+            "git push origin heads/main",
+            "git push origin feature:refs/heads/main",
+            # `+` перед ссылкой — это force без флага force.
+            "git push origin +main",
+            "git push origin +feature",
+            "git push origin +feature:other",
         ]
         allowed = [
             "git merge origin/main",
@@ -468,6 +525,9 @@ def main() -> int:
             "perl -MList::Util=sum -e 'print 1'",
             "ruby -Ilib -e 'puts 1'",
             "git add -p",
+            # `HEAD` с рабочей ветки — обычная запись, а не отправка в основную.
+            "git push origin HEAD",
+            "git push origin refs/heads/feature",
         ]
         # Отправка без явной ветки запрещена только ИЗ основной ветки — а это
         # значит, что на обычной ветке та же команда обязана проходить.
@@ -475,6 +535,7 @@ def main() -> int:
         write_config(onmain)
         git(["checkout", "-q", "main"], onmain)
         for cmd, expect in (("git push", 2), ("git push -o ci.skip origin", 2),
+                            ("git push origin HEAD", 2),
                             ("git push origin feature", 0)):
             code, _o, _e = run_hook("guard_bash.py", {
                 "tool_name": "Bash", "cwd": str(onmain),
@@ -537,6 +598,17 @@ def main() -> int:
             "tool_name": "Bash", "cwd": str(repo),
             "tool_input": {"command": 'bash -c "timeout 600 pytest tests/"'}}, repo)
         check("потолок внутри оболочки тоже считается", code == 0)
+        # Шаблон сверяется С НАЧАЛА команды, поэтому каждую запись запуска надо
+        # перечислить отдельно. Проверяется это на образцовом конфиге: если он
+        # неполон, все, кто скопирует его как есть, получат дырявый потолок.
+        write_config(repo, {"require_timeout_for":
+                            json.loads((ROOT / "config.example.json").read_text(
+                                encoding="utf-8"))["require_timeout_for"]})
+        for cmd in ("pytest tests/", "python3 -m pytest tests/", "poetry run pytest tests/"):
+            code, _o, _e = run_hook("guard_resources.py", {
+                "tool_name": "Bash", "cwd": str(repo),
+                "tool_input": {"command": cmd}}, repo)
+            check(f"образцовый конфиг видит запуск: {cmd!r}", code == 2, f"вернул {code}")
 
         print("\n12. Гейт плана")
         planned = make_repo(tmp, "planned")
@@ -599,6 +671,22 @@ def main() -> int:
                            'gh pr create --title t --body "$(cat <<\'EOF\'\nCloses #42\nEOF\n)"'}},
             planned)
         check("описание из вложенного документа в кавычках читается", code == 0, err[:200])
+        # Описание из файла через подстановку — тоже обычная запись. Оболочка
+        # раскрывает её до запуска, до перехватчика доходит текст команды, и
+        # без чтения файла гейт отказывал бы при совершенно правильном PR.
+        (planned / "pr-body.md").write_text("Closes #42\n", encoding="utf-8")
+        code, _o, err = run_hook("issue_link_gate.py", {
+            "tool_name": "Bash", "cwd": str(planned),
+            "tool_input": {"command": 'gh pr create --title t --body "$(cat pr-body.md)"'}},
+            planned)
+        check("описание из файла через подстановку читается", code == 0, err[:200])
+        (planned / "empty-body.md").write_text("просто текст\n", encoding="utf-8")
+        code, _o, err = run_hook("issue_link_gate.py", {
+            "tool_name": "Bash", "cwd": str(planned),
+            "tool_input": {"command": 'gh pr create --title t --body "$(cat empty-body.md)"'}},
+            planned)
+        check("подстановка без ссылки на задачу всё равно отклоняется", code == 2,
+              f"вернул {code}")
         code, _o, err = run_hook("issue_link_gate.py", {
             "tool_name": "Bash", "cwd": str(planned),
             "tool_input": {"command": 'gh pr create --title t --body "Closes #42"'}}, planned)
