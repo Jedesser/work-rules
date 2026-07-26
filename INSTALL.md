@@ -7,8 +7,10 @@
 ```bash
 # 1. Скопировать перехватчики в проект
 git clone https://github.com/Jedesser/work-rules /tmp/work-rules
-mkdir -p <ваш-проект>/.claude
-cp -r /tmp/work-rules/hooks <ваш-проект>/.claude/hooks
+mkdir -p <ваш-проект>/.claude/hooks
+# точка в конце пути-источника обязательна: без неё, если каталог уже есть,
+# получится .claude/hooks/hooks — и ни один перехватчик не найдётся
+cp -r /tmp/work-rules/hooks/. <ваш-проект>/.claude/hooks/
 chmod +x <ваш-проект>/.claude/hooks/*.py
 
 # 2. Настроить под проект
@@ -19,9 +21,13 @@ cp /tmp/work-rules/config.example.json <ваш-проект>/.claude/gates.confi
 # содержимое settings.example.json влить в <ваш-проект>/.claude/settings.json
 
 # 4. Проверить, что всё живо
-cp -r /tmp/work-rules/ci <ваш-проект>/ci
+mkdir -p <ваш-проект>/ci
+cp -r /tmp/work-rules/ci/. <ваш-проект>/ci/
 python3 <ваш-проект>/ci/check_gates_consistency.py
 ```
+
+Каталог `hooks/lib/` копируется вместе с остальным и обязателен: в нём общее ядро,
+без которого ни один перехватчик не запустится.
 
 Последний шаг обязателен и должен стать шагом вашего пайплайна: перехватчики ломаются молча,
 и без теста поломка выглядит как «всё зелено».

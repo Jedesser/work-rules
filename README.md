@@ -98,7 +98,8 @@
 
 ```bash
 git clone https://github.com/Jedesser/work-rules
-cp -r work-rules/hooks <ваш-проект>/.claude/hooks
+mkdir -p <ваш-проект>/.claude/hooks
+cp -r work-rules/hooks/. <ваш-проект>/.claude/hooks/
 cp work-rules/config.example.json <ваш-проект>/.claude/gates.config.json
 # заполнить конфигурацию под проект, зарегистрировать перехватчики
 python3 work-rules/ci/check_gates_consistency.py   # проверить обе стороны
