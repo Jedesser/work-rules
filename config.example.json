@@ -64,6 +64,7 @@
   "pr_merge_patterns": ["\\bgh pr merge\\b", "\\bglab mr merge\\b"],
   "issue_exempt_branch_prefixes": ["hotfix/"],
   "issue_gate_min_files": 2,
+  "issue_link_regex": "\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?:\\s*:|\\s+)\\s*(?:[\\w.-]+/[\\w.-]+)?#\\d+",
 
   "plan": {
     "enabled": false,
@@ -75,5 +76,13 @@
     ]
   },
 
-  "git_timeout": 10
+  "_timeouts_comment": [
+    "Потолки на вызовы git. Держите их согласованными с таймаутами, с которыми",
+    "перехватчики зарегистрированы в settings.json: если рантайм убьёт хук раньше,",
+    "чем тот успеет ответить, действие будет РАЗРЕШЕНО — и гейт, объявленный",
+    "падающим закрыто, окажется падающим открыто. Соотношение проверяет",
+    "ci/check_gates_consistency.py."
+  ],
+  "git_timeout": 5,
+  "git_diff_timeout": 15
 }
