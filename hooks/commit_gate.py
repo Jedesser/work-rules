@@ -56,7 +56,7 @@ def main() -> int:
 
     for segment, seg_dir in segments:
         tokens = G.tokenize(segment)
-        parsed = G.parse_git(tokens)
+        parsed = G.parse_git(tokens, seg_dir)
         if not parsed or parsed.get("subcommand") != "commit":
             continue
 
@@ -221,7 +221,7 @@ def collect_adds(segments: list[tuple[str, str]], session_dir: str) -> dict[str,
     """
     out: dict[str, list[str]] = {}
     for segment, shell_cwd in segments:
-        parsed = G.parse_git(G.tokenize(segment))
+        parsed = G.parse_git(G.tokenize(segment), shell_cwd)
         # `git stage` — синоним `git add`; отдельный список синонимов не заводим,
         # но сам синоним обязан учитываться, иначе им и обходят.
         if not parsed or parsed.get("subcommand") not in ("add", "stage"):

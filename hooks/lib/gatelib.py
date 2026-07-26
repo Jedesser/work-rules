@@ -979,7 +979,7 @@ def strip_env_prefix(tokens: list[str]) -> tuple[list[str], dict[str, str]]:
     return tokens[i:], env
 
 
-def parse_git(tokens: list[str]) -> dict | None:
+def parse_git(tokens: list[str], cwd: str = "") -> dict | None:
     """Разбирает вызов git: подкоманда, её аргументы, глобальные флаги.
 
     Имя бинарника берётся как basename — иначе `/usr/bin/git rebase`
@@ -987,6 +987,11 @@ def parse_git(tokens: list[str]) -> dict | None:
     Слова-обёртки снимаются (`env git …`, `sudo git …`), а присваивания
     переменных собираются из ОБЕИХ позиций: перед обёрткой и после неё
     (`env GIT_DIR=/tmp git commit` — присваивание стоит после `env`).
+
+    Псевдоним раскрывается в настоящую подкоманду: `git ci -m x` при
+    `alias.ci = commit` — это коммит, и гейт, знающий только слово `commit`,
+    пропустил бы его. Псевдоним задаётся и прямо в команде (`git -c
+    alias.x=commit x`), поэтому смотрится и то, и другое.
     """
     head, env = strip_env_prefix(tokens)
     head, env2 = peel_wrappers(head)
@@ -997,9 +1002,10 @@ def parse_git(tokens: list[str]) -> dict | None:
     while i < len(head):
         tok = head[i]
         if not tok.startswith("-"):
+            sub, extra = resolve_alias(tok, globals_seen, cwd)
             return {
-                "subcommand": tok,
-                "args": head[i + 1:],
+                "subcommand": sub,
+                "args": extra + head[i + 1:],
                 "globals": globals_seen,
                 "env": env,
             }
@@ -1013,6 +1019,47 @@ def parse_git(tokens: list[str]) -> dict | None:
             continue
         i += 1
     return {"subcommand": None, "args": [], "globals": globals_seen, "env": env}
+
+
+# Псевдонимы, заданные прямо в команде: `git -c alias.co=checkout co main`.
+INLINE_ALIAS_RE = re.compile(r"^alias\.([^=]+)=(.*)$")
+
+
+def resolve_alias(sub: str, globals_seen: list[str], cwd: str) -> tuple[str, list[str]]:
+    """Настоящая подкоманда за псевдонимом и его собственные аргументы.
+
+    Возвращает исходное имя, если это не псевдоним, — тогда ничего не меняется.
+    Псевдоним-команда оболочки (`!sh -c …`) не раскрывается: за ним может быть
+    что угодно, и притворяться, что мы это разобрали, хуже, чем не разбирать.
+    """
+    if sub in KNOWN_GIT_SUBCOMMANDS:
+        return sub, []
+    expansion = ""
+    for tok in globals_seen:
+        m = INLINE_ALIAS_RE.match(tok)
+        if m and m.group(1) == sub:
+            expansion = m.group(2)
+    if not expansion and cwd:
+        code, out = git(["config", "--get", f"alias.{sub}"], cwd)
+        if code == 0:
+            expansion = out.strip()
+    if not expansion or expansion.startswith("!"):
+        return sub, []
+    parts = tokenize(expansion)
+    return (parts[0], parts[1:]) if parts else (sub, [])
+
+
+# Подкоманды, которые точно не псевдонимы: для них вызывать git незачем.
+# Список неполный намеренно — незнакомое слово просто проверяется через
+# `git config`, и цена этого — один дешёвый локальный вызов.
+KNOWN_GIT_SUBCOMMANDS = {
+    "add", "am", "apply", "bisect", "blame", "branch", "checkout", "cherry-pick",
+    "clean", "clone", "commit", "config", "diff", "fetch", "grep", "init", "log",
+    "merge", "mv", "pull", "push", "rebase", "reset", "restore", "revert", "rm",
+    "show", "stash", "stage", "status", "submodule", "switch", "tag", "worktree",
+    "rev-parse", "ls-files", "describe", "remote", "reflog", "shortlog",
+    "sparse-checkout", "cat-file", "for-each-ref", "symbolic-ref", "update-ref",
+}
 
 
 def git_dash_c_dir(parsed: dict) -> str | None:

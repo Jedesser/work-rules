@@ -79,7 +79,7 @@ def main() -> int:
         exe = os.path.basename(stripped[0])
 
         # --- git ---
-        parsed = G.parse_git(tokens)
+        parsed = G.parse_git(tokens, seg_dir)
         if parsed:
             # `git -C <путь> push` спрашивает про ветку ТОГО дерева: текущая
             # ветка сессии к нему отношения не имеет, и проверка «отправка без

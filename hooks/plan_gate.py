@@ -49,7 +49,7 @@ def main() -> int:
     shell_cwd = str(data.get("cwd") or "")
     commit_dir = None
     for segment, seg_dir in G.segments_with_dirs(command, shell_cwd):
-        parsed = G.parse_git(G.tokenize(segment))
+        parsed = G.parse_git(G.tokenize(segment), seg_dir)
         if parsed and parsed.get("subcommand") == "commit":
             env = parsed.get("env", {})
             if env.get("PLAN_OK") == "1":
