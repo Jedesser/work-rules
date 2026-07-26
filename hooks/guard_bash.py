@@ -42,6 +42,12 @@ SED_NAMES = {"sed", "gsed", "ssed", "minised"}
 RM_NAMES = {"rm"}
 INPLACE_RE = re.compile(r"^-{1,2}i")
 
+# `-i` у интерпретатора: только среди ОДНОБУКВЕННЫХ флагов и только до
+# первого флага, забирающего значение. Наивное «в токене есть буква i»
+# запрещало совершенно обычные `perl -Mstrict -e …` и `ruby -Ilib -e …`, а
+# перехватчик, мешающий обычной работе, живёт до первого раздражения.
+INTERPRETER_INPLACE_RE = re.compile(r"^-[acdlnpsvwx]*i(?:\.[^ ]*)?(?:[acdlnpsvwx]*)$")
+
 
 def main() -> int:
     data = G.read_hook_input()
@@ -54,11 +60,18 @@ def main() -> int:
     cfg = G.load_config()
     main_branch = cfg["main_branch"]
 
-    for segment in G.split_segments(command):
+    # Каталог считается лениво: он нужен ровно одной проверке (отправка без
+    # явной ветки), а его вычисление — это вызов git. Считать его на КАЖДЫЙ
+    # вызов Bash значит платить запуском процесса за команды, в которых
+    # никакого git нет вовсе.
+    session_cwd = data.get("cwd")
+
+    for segment in G.expand_segments(command):
         tokens = G.tokenize(segment)
         if not tokens:
             continue
         stripped, _env = G.strip_env_prefix(tokens)
+        stripped, _env2 = G.peel_wrappers(stripped)
         if not stripped:
             continue
         exe = os.path.basename(stripped[0])
@@ -66,7 +79,14 @@ def main() -> int:
         # --- git ---
         parsed = G.parse_git(tokens)
         if parsed:
-            verdict = check_git(parsed, main_branch)
+            # `git -C <путь> push` спрашивает про ветку ТОГО дерева: текущая
+            # ветка сессии к нему отношения не имеет, и проверка «отправка без
+            # явной ветки» по ней дала бы вердикт про чужой репозиторий.
+            target = G.git_dash_c_dir(parsed)
+            verdict = check_git(
+                parsed, main_branch,
+                lambda t=target: G.resolve_work_dir(
+                    t if t and os.path.isdir(t) else session_cwd))
             if verdict:
                 return G.block(verdict)
 
@@ -83,7 +103,10 @@ def main() -> int:
                 "ревьюить нечего, а ошибка обнаруживается уже в проде.\n"
                 "Используйте обычные операции чтения/правки/записи файла."
             )
-        if exe in {"perl", "ruby"} and "-i" in stripped[1:]:
+        # `-i` у интерпретатора почти всегда стоит слитно с другими буквами
+        # (`perl -pi -e …`, `perl -i.bak -pe …`), поэтому точное сравнение
+        # токена пропускало ровно те формы, которыми правку и делают.
+        if exe in {"perl", "ruby"} and any(INTERPRETER_INPLACE_RE.match(t) for t in stripped[1:]):
             return G.block(
                 "🛑 Правка файла на месте через интерпретатор запрещена — "
                 "по той же причине, что и sed -i: изменение не поддаётся ревью."
@@ -92,7 +115,42 @@ def main() -> int:
     return 0
 
 
-def check_git(parsed: dict, main_branch: str) -> str | None:
+# Только те, что берут значение ОТДЕЛЬНЫМ словом. `-u` сюда не входит
+# намеренно: у `git push -u origin feature` он значения не берёт, и лишний
+# пропуск съел бы имя удалённого репозитория.
+PUSH_VALUE_FLAGS = {"-o", "--push-option", "--repo", "--receive-pack", "--exec"}
+
+
+def _push_refspecs(args: list[str]) -> list[str]:
+    """Что именно отправляют: всё позиционное после имени удалённого репозитория.
+
+    Значения флагов приходится пропускать явно: у `git push -o ci.skip` наивный
+    отбор «токены без дефиса» принимает `ci.skip` за ветку, решает, что ветка
+    указана, и молча снимает проверку «отправка без явной ветки».
+    """
+    positional: list[str] = []
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok.startswith("--") and "=" in tok:
+            i += 1
+            continue
+        if tok.startswith("-"):
+            i += 2 if tok in PUSH_VALUE_FLAGS and i + 1 < len(args) else 1
+            continue
+        positional.append(tok)
+        i += 1
+    return positional[1:]
+
+
+def _has_letter(tok: str, letter: str) -> bool:
+    """Есть ли буква среди ОДНОБУКВЕННЫХ флагов связки: `-fu`, `-Av`, `-f`."""
+    return tok.startswith("-") and not tok.startswith("--") and letter in tok[1:]
+
+
+def check_git(parsed: dict, main_branch: str, work_dir) -> str | None:
+    """work_dir передаётся ЛЕНИВО (вызываемым объектом): он нужен одной ветке
+    проверки, а его вычисление стоит запуска git."""
     sub = parsed.get("subcommand")
     args = parsed.get("args", [])
 
@@ -110,19 +168,38 @@ def check_git(parsed: dict, main_branch: str) -> str | None:
             "Вместо этого: новый коммит поверх."
         )
     if sub == "push":
-        if any(a in ("--force", "-f", "--force-with-lease") for a in args):
+        # Слитные связки (`-fu`) — обычная запись, и точное сравнение токена
+        # пропускало именно её. Проверка по буквам, как у `git clean`.
+        if any(a in ("--force", "--force-with-lease") or _has_letter(a, "f") for a in args):
             return (
                 "🛑 Принудительная отправка запрещена.\n"
                 "Она молча уничтожает чужие коммиты в общей ветке."
             )
-        positional = [a for a in args if not a.startswith("-")]
+        # `--all` / `--mirror` отправляют все ветки разом, включая основную.
+        if any(a in ("--all", "--mirror") for a in args):
+            return (
+                f"🛑 `git push {[a for a in args if a in ('--all', '--mirror')][0]}` запрещён — "
+                f"он отправляет все ветки разом, в том числе `{main_branch}`.\n"
+                "Всё попадает в основную ветку только через PR и его проверки."
+            )
+        refspecs = _push_refspecs(args)
         # `git push origin main` / `git push origin HEAD:main`
-        if any(a == main_branch or a.endswith(f":{main_branch}") for a in positional[1:]):
+        if any(a == main_branch or a.endswith(f":{main_branch}") for a in refspecs):
             return (
                 f"🛑 Прямая отправка в `{main_branch}` запрещена.\n"
                 "Всё попадает в основную ветку только через PR и его проверки."
             )
-    if sub == "add" and any(a in ("-A", "--all", ".") for a in args):
+        # Без явной ветки git отправляет текущую — самая частая форма записи,
+        # и раньше именно она проходила мимо запрета.
+        if not refspecs and G.current_branch(work_dir()) == main_branch:
+            return (
+                f"🛑 Отправка без явной ветки из `{main_branch}` запрещена — "
+                f"git отправит текущую ветку, то есть прямо в основную.\n"
+                "Всё попадает в основную ветку только через PR и его проверки."
+            )
+    if sub in ("add", "stage") and any(
+        a in ("--all", "--no-ignore-removal", ".") or _has_letter(a, "A") for a in args
+    ):
         return (
             "🛑 `git add -A` / `git add .` запрещены.\n"
             "Так в коммит попадают секреты, временные файлы и чужие изменения, "

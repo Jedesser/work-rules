@@ -48,14 +48,46 @@ def main() -> int:
 
     cfg = G.load_config()
 
-    for segment in G.split_segments(command):
+    # Потолок по времени ищется в СВОЁМ верхнем сегменте, а не где угодно в
+    # строке. Правильно обёрнутый `timeout 600 bash -c "…тесты…"` даёт
+    # вложенный сегмент без своего `timeout` — требовать потолок и там значит
+    # блокировать ровно тот приём, который сам ограничитель и рекомендует. Но
+    # проверять «есть ли `timeout` хоть где-нибудь» тоже нельзя: тогда
+    # `timeout 5 true && pytest tests/` снимает требование со второй команды.
+    for top in G.split_segments(command):
+        covered = bool(TIMEOUT_PREFIX_RE.match(top.strip()))
+        verdict = check_segment_group(G.expand_segments(top), covered, cfg)
+        if verdict is not None:
+            return verdict
+    return 0
+
+
+def head_of(segment: str) -> str:
+    """Сегмент в виде «команда с аргументами», без обёрток и присваиваний.
+
+    Сравнивать надо именно с ним, а не с сырой строкой: иначе ограничитель
+    срабатывает на УПОМИНАНИЕ, и обычное сообщение коммита «fix: flaky pytest»
+    блокируется. Ровно ту же ошибку в двух других перехватчиках лечит
+    G.invocations().
+    """
+    peeled, _env = G.peel_wrappers(G.tokenize(segment))
+    if not peeled:
+        return ""
+    return " ".join([os.path.basename(peeled[0]), *peeled[1:]])
+
+
+def check_segment_group(segments: list[str], covered: bool, cfg: dict) -> int | None:
+    for segment in segments:
+        head = head_of(segment)
+        if not head:
+            continue
         # --- запрещённые локально команды ---
         for pattern in cfg.get("forbidden_local_commands", []):
-            if re.search(pattern, segment):
+            if re.match(pattern, head):
                 escape = cfg.get("forbidden_local_escape_env") or ""
                 if escape and os.environ.get(escape) == "1":
                     continue
-                _tokens, env = G.strip_env_prefix(G.tokenize(segment))
+                _tokens, env = G.peel_wrappers(G.tokenize(segment))
                 if escape and env.get(escape) == "1":
                     continue
                 return G.block(
@@ -68,9 +100,9 @@ def main() -> int:
 
         # --- тесты без внешнего потолка ---
         for pattern in cfg.get("require_timeout_for", []):
-            if not re.search(pattern, segment):
+            if not re.match(pattern, head):
                 continue
-            if TIMEOUT_PREFIX_RE.match(segment.strip()):
+            if covered or TIMEOUT_PREFIX_RE.match(segment.strip()):
                 continue
             return G.block(
                 f"🛑 Прогон тестов без внешнего потолка по времени:\n    {segment.strip()}\n\n"
@@ -81,7 +113,7 @@ def main() -> int:
                 "Потолок ставится СНАРУЖИ: зависший процесс свою внутреннюю "
                 "настройку таймаута уже не прочитает."
             )
-    return 0
+    return None
 
 
 if __name__ == "__main__":
