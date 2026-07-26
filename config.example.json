@@ -1,0 +1,79 @@
+{
+  "_comment": [
+    "Копия этого файла кладётся в <корень проекта>/.claude/gates.config.json.",
+    "Здесь настраивается ВСЁ, что специфично для проекта: пути, пороги, ревьюеры.",
+    "В самих хуках проектных строк нет намеренно — иначе перенос в другой",
+    "репозиторий превращается в правку десяти файлов, и списки разъезжаются.",
+    "",
+    "Главное правило при заполнении: критические пути и красная зона проверяются",
+    "по РЕАЛЬНОМУ дереву репозитория, а не пишутся по памяти. Список, написанный",
+    "по догадке об именах каталогов, однажды не совпал ни с чем — и критичный код",
+    "месяцами шёл мимо положенного ревью, при том что защита выглядела рабочей."
+  ],
+
+  "base_ref": "origin/main",
+  "main_branch": "main",
+
+  "shared_checkout": "/absolute/path/to/shared/checkout",
+
+  "receipt_fresh_seconds": 7200,
+
+  "commit_gate": { "max_files": 5 },
+  "merge_gate": { "max_files": 5, "max_additions": 200 },
+
+  "critical_paths": [
+    "^\\.github/workflows/",
+    "(^|/)k8s/",
+    "(^|/)(Dockerfile|docker-compose\\.ya?ml)$",
+    "(^|/)migrations?/",
+    "(^|/)(main|app|server)\\.(py|go|ts|js)$"
+  ],
+
+  "red_zone_paths": [
+    "(^|/)auth[a-z]*/",
+    "(^|/)payment[a-z]*/",
+    "(^|/)billing[a-z]*/",
+    "(^|/)(entitlement|subscription)[a-z]*/",
+    "(^|/)(session|token|password)[a-z]*/"
+  ],
+
+  "reviewers": {
+    "always": ["change-reviewer"],
+    "by_path": [
+      { "pattern": "\\.(go|rs|java|kt)$", "reviewer": "language-reviewer" },
+      { "pattern": "(^|/)migrations?/", "reviewer": "migration-reviewer" },
+      { "pattern": "^(frontend|web|ui)/", "reviewer": "pattern-reviewer" }
+    ],
+    "red_zone": "critical-zone-reviewer"
+  },
+
+  "require_timeout_for": [
+    "\\bgo test\\b",
+    "\\bpytest\\b",
+    "\\bnpm (run )?test\\b",
+    "\\bcargo test\\b"
+  ],
+
+  "forbidden_local_commands": [
+    "\\bnpm run build\\b",
+    "\\bnext build\\b"
+  ],
+  "forbidden_local_escape_env": "HEAVY_BUILD_OK",
+
+  "pr_create_patterns": ["\\bgh pr create\\b", "\\bglab mr create\\b"],
+  "pr_merge_patterns": ["\\bgh pr merge\\b", "\\bglab mr merge\\b"],
+  "issue_exempt_branch_prefixes": ["hotfix/"],
+  "issue_gate_min_files": 2,
+
+  "plan": {
+    "enabled": false,
+    "dir": "docs/plans",
+    "min_files": 2,
+    "status_patterns": [
+      "^Статус: согласован владельцем \\d{4}-\\d{2}-\\d{2}$",
+      "^Статус: технический — согласование не требуется$"
+    ]
+  },
+
+  "git_timeout": 10
+}
