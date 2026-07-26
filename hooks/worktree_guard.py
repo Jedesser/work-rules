@@ -137,7 +137,7 @@ def bash_targets(command: str, base: str) -> list[tuple[str, str]]:
         if not peeled:
             continue
         name = os.path.basename(peeled[0])
-        parsed = G.parse_git(tokens)
+        parsed = G.parse_git(tokens, seg_dir)
 
         # Перенаправление пишет независимо от того, что за команда слева.
         found.extend(_redirect_targets(segment, seg_dir))
