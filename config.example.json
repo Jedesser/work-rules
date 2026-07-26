@@ -47,9 +47,18 @@
     "red_zone": "critical-zone-reviewer"
   },
 
+  "_patterns_comment": [
+    "Все шаблоны ниже сверяются С НАЧАЛА команды сегмента, уже очищенной от",
+    "приставок переменных и обёрток (env, sudo, timeout, nice) и от пути к файлу.",
+    "Поэтому `\\bpytest\\b` поймает `pytest -q`, но НЕ поймает `python -m pytest`:",
+    "это другое начало строки, и его нужно перечислить отдельно. Проверьте, что",
+    "перечислены все записи, которыми команду реально запускают у вас."
+  ],
   "require_timeout_for": [
     "\\bgo test\\b",
     "\\bpytest\\b",
+    "python[0-9.]* -m pytest\\b",
+    "(poetry|pipenv|uv|pdm|hatch) run .*\\bpytest\\b",
     "\\bnpm (run )?test\\b",
     "\\bcargo test\\b"
   ],
@@ -61,7 +70,11 @@
   "forbidden_local_escape_env": "HEAVY_BUILD_OK",
 
   "pr_create_patterns": ["\\bgh pr create\\b", "\\bglab mr create\\b"],
-  "pr_merge_patterns": ["\\bgh pr merge\\b", "\\bglab mr merge\\b"],
+  "pr_merge_patterns": [
+    "\\bgh pr merge\\b",
+    "\\bglab mr merge\\b",
+    "\\bgh api\\b.*\\bpulls/\\d+/merge\\b"
+  ],
   "issue_exempt_branch_prefixes": ["hotfix/"],
   "issue_gate_min_files": 2,
   "issue_link_regex": "\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?:\\s*:|\\s+)\\s*(?:[\\w.-]+/[\\w.-]+)?#\\d+",

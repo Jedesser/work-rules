@@ -37,10 +37,22 @@ def main() -> int:
     # Совпадение — от начала сегмента, а не где угодно в строке: иначе
     # `gh  pr merge` (два пробела) проходит мимо, а безобидное
     # `echo "gh pr merge"` наоборот блокируется.
-    if not G.invocations(command, cfg["pr_merge_patterns"]):
+    shell_cwd = str(data.get("cwd") or "")
+    hits = G.invocations(command, cfg["pr_merge_patterns"], shell_cwd)
+    if not hits:
         return 0
 
-    work_dir = G.resolve_work_dir(data.get("cwd"))
+    # Каталог берётся у самого сегмента: `cd <другая копия> && gh pr merge`
+    # мержит ветку ТОЙ копии, и проверять дифф сессионной — значит смотреть
+    # не на тот код.
+    for _segment, seg_dir in hits:
+        code = check_tree(G.resolve_work_dir(seg_dir), command, cfg)
+        if code:
+            return code
+    return 0
+
+
+def check_tree(work_dir: str, command: str, cfg: dict) -> int:
     files = G.changed_files(work_dir)
     additions = G.added_lines(work_dir)
 
