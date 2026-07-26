@@ -206,6 +206,18 @@ def main() -> int:
             ("обёртка env со сменой каталога", "env -C /tmp git commit -m x"),
             ("обёртка timeout с флагом-значением", "timeout -s KILL 10 git commit -m x"),
             ("две обёртки подряд", "sudo -u someone nice -n 5 git commit -m x"),
+            # Группировка и служебные слова оболочки: без их снятия первым
+            # словом сегмента оказывается `(git`, `do`, `then`, разбор отвечает
+            # «это не git», и мимо проходит ВСЯ защита разом.
+            ("круглые скобки", "(git commit -m x)"),
+            ("круглые скобки с пробелом", "( git commit -m x )"),
+            ("фигурные скобки", "{ git commit -m x; }"),
+            ("тело цикла", "for d in .; do git commit -m x; done"),
+            ("ветка условия", "if true; then git commit -m x; fi"),
+            ("отрицание", "! git commit -m x"),
+            ("замер времени", "time git commit -m x"),
+            ("скобки поверх обёртки", "(env git commit -m x)"),
+            ("скобки поверх перехода", "(cd . && git commit -m x)"),
         ]
         for label, cmd in evasions:
             code, _o, _e = run_hook("commit_gate.py", {
@@ -504,6 +516,15 @@ def main() -> int:
             "git push origin +main",
             "git push origin +feature",
             "git push origin +feature:other",
+            # Записи принудительной отправки с равенством и группировкой.
+            "git push --force-with-lease=refs/heads/feature origin feature",
+            "git push --force-if-includes origin feature",
+            "(git push origin main)",
+            "(git rebase main)",
+            "while true; do git rebase main; done",
+            # `:/` и `*` — то же самое, что `-A`, только другими словами.
+            "git add :/",
+            "git add '*'",
         ]
         allowed = [
             "git merge origin/main",
@@ -528,6 +549,9 @@ def main() -> int:
             # `HEAD` с рабочей ветки — обычная запись, а не отправка в основную.
             "git push origin HEAD",
             "git push origin refs/heads/feature",
+            # Скобка внутри сообщения — не группировка.
+            "git commit -m 'fix: правка (важная)'",
+            'echo "(git rebase main)"',
         ]
         # Отправка без явной ветки запрещена только ИЗ основной ветки — а это
         # значит, что на обычной ветке та же команда обязана проходить.

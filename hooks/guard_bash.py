@@ -201,7 +201,10 @@ def check_git(parsed: dict, main_branch: str, work_dir) -> str | None:
     if sub == "push":
         # Слитные связки (`-fu`) — обычная запись, и точное сравнение токена
         # пропускало именно её. Проверка по буквам, как у `git clean`.
-        if any(a in ("--force", "--force-with-lease") or _has_letter(a, "f") for a in args):
+        # `--force-with-lease=<ссылка>` и `--force-if-includes` — те же записи
+        # принудительной отправки; точное сравнение их не ловит, а форма с `=`
+        # как раз рекомендуется в большинстве руководств.
+        if any(a.startswith("--force") or _has_letter(a, "f") for a in args):
             return (
                 "🛑 Принудительная отправка запрещена.\n"
                 "Она молча уничтожает чужие коммиты в общей ветке."
@@ -239,8 +242,11 @@ def check_git(parsed: dict, main_branch: str, work_dir) -> str | None:
                 f"git отправит текущую ветку, то есть прямо в основную.\n"
                 "Всё попадает в основную ветку только через PR и его проверки."
             )
+    # `:/` — «всё от корня репозитория», `"*"` — глоб, который раскрывает сам
+    # git. Обе записи делают ровно то же, что `-A`, и обе встречаются живьём.
     if sub in ("add", "stage") and any(
-        a in ("--all", "--no-ignore-removal", ".") or _has_letter(a, "A") for a in args
+        a in ("--all", "--no-ignore-removal", ".") or a.startswith(":/")
+        or a.strip("'\"") == "*" or _has_letter(a, "A") for a in args
     ):
         return (
             "🛑 `git add -A` / `git add .` запрещены.\n"

@@ -775,6 +775,47 @@ MAX_EXPAND_DEPTH = 3
 DURATION_RE = re.compile(r"^\d+(?:\.\d+)?[smhd]?$")
 
 
+# Служебные слова оболочки, после которых идёт обычная команда. Без них
+# первым словом сегмента оказывается `do` / `then` / `(git`, разбор отвечает
+# «это не git», и мимо проходит ВСЯ защита — включая запрет переписывания
+# истории. Записи вида `(git commit …)`, `{ git commit …; }`,
+# `for … do git commit … done`, `if …; then git commit …; fi` — не экзотика.
+SHELL_KEYWORDS = {"if", "then", "elif", "else", "fi", "do", "done", "while",
+                  "until", "for", "case", "esac", "in", "select", "function",
+                  "time", "!", ";"}
+GROUPING_CHARS = "({!"
+
+
+def strip_shell_syntax(tokens: list[str]) -> list[str]:
+    """Снимает группировку и служебные слова, оставляя саму команду.
+
+    Скобка часто слипается с командой (`(git`), поэтому чистится и префикс
+    токена, а не только отдельно стоящие символы. Хвостовая `)` снимается
+    ТОЛЬКО если открывающая была снята здесь же: иначе пострадала бы обычная
+    скобка внутри аргумента.
+    """
+    out = list(tokens)
+    opened = 0
+    while out:
+        head = out[0]
+        if head in SHELL_KEYWORDS:
+            out = out[1:]
+            continue
+        trimmed = head.lstrip(GROUPING_CHARS)
+        if trimmed == head:
+            break
+        opened += len(head) - len(trimmed)
+        out = ([trimmed] if trimmed else []) + out[1:]
+    while opened and out:
+        tail = out[-1]
+        trimmed = tail.rstrip(");}")
+        if trimmed == tail:
+            break
+        opened -= len(tail) - len(trimmed)
+        out = out[:-1] + ([trimmed] if trimmed else [])
+    return out
+
+
 def peel_wrappers(tokens: list[str]) -> tuple[list[str], dict[str, str]]:
     """Снимает слова-обёртки и их флаги, оставляя настоящую команду.
 
@@ -798,6 +839,7 @@ def peel_wrappers(tokens: list[str]) -> tuple[list[str], dict[str, str]]:
     out = list(tokens)
     collected: dict[str, str] = {}
     for _ in range(MAX_EXPAND_DEPTH):
+        out = strip_shell_syntax(out)
         out, env = strip_env_prefix(out)
         collected.update(env)
         if not out:
