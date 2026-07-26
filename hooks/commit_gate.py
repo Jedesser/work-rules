@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
@@ -39,17 +40,21 @@ def main() -> int:
         return 0
 
     cfg = G.load_config()
-    session_dir = G.resolve_work_dir(data.get("cwd"))
-    segments = G.expand_segments(command)
+    # Сегменты идут вместе с каталогом, в котором выполнятся: `cd` внутри
+    # команды меняет дерево для всего, что после него, и без этого гейт
+    # проверял бы дифф совсем другой рабочей копии.
+    shell_cwd = str(data.get("cwd") or "")
+    session_dir = G.resolve_work_dir(shell_cwd)
+    segments = G.segments_with_dirs(command, shell_cwd or session_dir)
 
     # `git add` в той же команде, что и коммит с обходом, — отдельная дыра.
     # Перехватчик видит дерево ДО выполнения, а `git diff` не показывает
     # файлы, о которых git ещё не знает. Значит `git add новый_файл &&
     # REVIEW_DONE=1 git commit` пронёс бы непроверенный файл под распиской,
     # выписанной на дифф без него.
-    pending_adds = collect_adds(segments, session_dir, str(data.get("cwd") or ""))
+    pending_adds = collect_adds(segments, session_dir)
 
-    for segment in segments:
+    for segment, seg_dir in segments:
         tokens = G.tokenize(segment)
         parsed = G.parse_git(tokens)
         if not parsed or parsed.get("subcommand") != "commit":
@@ -70,7 +75,7 @@ def main() -> int:
                     f"Используйте `git -C <путь> commit`."
                 )
 
-        work_dir = parsed_dir(parsed, session_dir)
+        work_dir = parsed_dir(parsed, G.resolve_work_dir(seg_dir) or session_dir)
 
         # `git commit -a` / `-am` коммитит всё изменённое, ничего не добавляя
         # в индекс заранее. Смотреть только на индекс здесь означает увидеть
@@ -137,6 +142,21 @@ COMMIT_VALUE_FLAGS = {"-m", "-F", "-C", "-c", "--message", "--file", "--author",
                       "--squash", "--cleanup"}
 
 
+# Связка коротких флагов, у которой значение забирает ПОСЛЕДНЯЯ буква:
+# `-sm "текст"`, `-am "текст"`, `-qF файл`. Буквы до неё — только те, что
+# значения не берут; иначе произвольный аргумент вроде `-Sabc` случайно
+# съедал бы следующий токен.
+BUNDLE_VALUE_RE = re.compile(r"^-[apevqsnoit]*[mFCc]$")
+
+
+def _advance(args: list[str], i: int) -> int:
+    """Индекс следующего токена: флаг вместе со своим значением."""
+    tok = args[i]
+    if tok in COMMIT_VALUE_FLAGS or BUNDLE_VALUE_RE.match(tok):
+        return i + 2
+    return i + 1
+
+
 def commits_all(args: list[str]) -> bool:
     """Есть ли у `git commit` флаг «взять всё изменённое» — в любом написании.
 
@@ -151,21 +171,16 @@ def commits_all(args: list[str]) -> bool:
     i = 0
     while i < len(args):
         tok = args[i]
-        if tok in COMMIT_VALUE_FLAGS:
-            i += 2
-            continue
-        if tok.startswith("--"):
-            if tok == "--all":
-                return True
-            i += 1
-            continue
-        if tok.startswith("-") and tok != "-":
-            if "a" in tok[1:]:
-                return True
-            i += 1
-            continue
-        # Первое непозиционное слово — путь; дальше флагов «взять всё» нет.
-        break
+        if tok == "--":
+            break
+        if tok == "--all":
+            return True
+        if tok.startswith("-") and tok != "-" and not tok.startswith("--") and "a" in tok[1:]:
+            return True
+        if not tok.startswith("-") or tok == "-":
+            # Первое непозиционное слово — путь; дальше флагов «взять всё» нет.
+            break
+        i = _advance(args, i)
     return False
 
 
@@ -180,13 +195,9 @@ def has_pathspec(args: list[str]) -> bool:
         tok = args[i]
         if tok == "--":
             return i + 1 < len(args)
-        if tok in COMMIT_VALUE_FLAGS:
-            i += 2
-            continue
-        if tok.startswith("-") and tok != "-":
-            i += 1
-            continue
-        return True
+        if not tok.startswith("-") or tok == "-":
+            return True
+        i = _advance(args, i)
     return False
 
 
@@ -196,7 +207,7 @@ ADD_SCOPE_UNKNOWN = "<весь индекс>"
 ADD_TRACKED_ONLY = {"-u", "--update", "-p", "--patch", "-i", "--interactive"}
 
 
-def collect_adds(segments: list[str], session_dir: str, shell_cwd: str) -> dict[str, list[str]]:
+def collect_adds(segments: list[tuple[str, str]], session_dir: str) -> dict[str, list[str]]:
     """Что каждый `git add` в этой команде собирается положить в индекс.
 
     Разложено по деревьям: `git -C /другая/копия add x` к текущему гейту
@@ -209,13 +220,13 @@ def collect_adds(segments: list[str], session_dir: str, shell_cwd: str) -> dict[
     в проверенном диффе есть.
     """
     out: dict[str, list[str]] = {}
-    for segment in segments:
+    for segment, shell_cwd in segments:
         parsed = G.parse_git(G.tokenize(segment))
         # `git stage` — синоним `git add`; отдельный список синонимов не заводим,
         # но сам синоним обязан учитываться, иначе им и обходят.
         if not parsed or parsed.get("subcommand") not in ("add", "stage"):
             continue
-        work_dir = parsed_dir(parsed, session_dir)
+        work_dir = parsed_dir(parsed, G.resolve_work_dir(shell_cwd) or session_dir)
         args = parsed.get("args", [])
         if any(a in ADD_TRACKED_ONLY for a in args):
             continue

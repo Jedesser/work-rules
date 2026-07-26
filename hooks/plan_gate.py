@@ -44,18 +44,22 @@ def main() -> int:
     if not plan_cfg.get("enabled"):
         return 0
 
-    is_commit = False
-    for segment in G.expand_segments(command):
+    # Каталог берётся у сегмента, а не у сессии: `cd <другая копия> &&
+    # git commit` коммитит в ту копию, и план надо искать там же.
+    shell_cwd = str(data.get("cwd") or "")
+    commit_dir = None
+    for segment, seg_dir in G.segments_with_dirs(command, shell_cwd):
         parsed = G.parse_git(G.tokenize(segment))
         if parsed and parsed.get("subcommand") == "commit":
-            is_commit = True
             env = parsed.get("env", {})
             if env.get("PLAN_OK") == "1":
                 return 0
-    if not is_commit or os.environ.get("PLAN_OK") == "1":
+            if commit_dir is None:
+                commit_dir = G.git_dash_c_dir(parsed) or seg_dir
+    if commit_dir is None or os.environ.get("PLAN_OK") == "1":
         return 0
 
-    work_dir = G.resolve_work_dir(data.get("cwd"))
+    work_dir = G.resolve_work_dir(commit_dir)
     branch = G.current_branch(work_dir)
     if any(branch.startswith(p) for p in cfg["issue_exempt_branch_prefixes"]):
         return 0
