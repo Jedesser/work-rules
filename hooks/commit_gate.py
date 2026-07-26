@@ -40,8 +40,16 @@ def main() -> int:
 
     cfg = G.load_config()
     session_dir = G.resolve_work_dir(data.get("cwd"))
+    segments = G.expand_segments(command)
 
-    for segment in G.split_segments(command):
+    # `git add` в той же команде, что и коммит с обходом, — отдельная дыра.
+    # Перехватчик видит дерево ДО выполнения, а `git diff` не показывает
+    # файлы, о которых git ещё не знает. Значит `git add новый_файл &&
+    # REVIEW_DONE=1 git commit` пронёс бы непроверенный файл под распиской,
+    # выписанной на дифф без него.
+    pending_adds = collect_adds(segments, session_dir, str(data.get("cwd") or ""))
+
+    for segment in segments:
         tokens = G.tokenize(segment)
         parsed = G.parse_git(tokens)
         if not parsed or parsed.get("subcommand") != "commit":
@@ -63,14 +71,30 @@ def main() -> int:
                 )
 
         work_dir = parsed_dir(parsed, session_dir)
-        files = G.staged_files(work_dir)
+
+        # `git commit -a` / `-am` коммитит всё изменённое, ничего не добавляя
+        # в индекс заранее. Смотреть только на индекс здесь означает увидеть
+        # пустой набор файлов и мирно пропустить коммит любого размера.
+        # Берётся дерево против ПОСЛЕДНЕГО коммита, а не против точки
+        # ветвления: `-a` заберёт именно это, а всё, что уже закоммичено на
+        # ветке, к текущему коммиту отношения не имеет.
+        # `git commit <путь>` — та же дыра другой записью: коммитится
+        # содержимое дерева по этому пути, индекс при этом пуст.
+        args = parsed.get("args", [])
+        if commits_all(args) or has_pathspec(args):
+            files = sorted(set(G.uncommitted_files(work_dir)) | set(G.staged_files(work_dir)))
+        else:
+            files = G.staged_files(work_dir)
+        # Пустой набор или мелкое некритичное изменение — этот сегмент вопросов
+        # не вызывает. Но выйти отсюда насовсем нельзя: в команде может быть
+        # ещё один коммит, и первый безобидный снимал бы гейт со всей строки.
         if not files:
-            return 0
+            continue
 
         big = len(files) >= cfg["commit_gate"]["max_files"]
         critical = [f for f in files if G.is_critical(f, cfg)]
         if not big and not critical:
-            return 0
+            continue
 
         bypass = parsed["env"].get("REVIEW_DONE") == "1" or os.environ.get("REVIEW_DONE") == "1"
         reviewers = G.required_reviewers(files, cfg)
@@ -78,9 +102,21 @@ def main() -> int:
         if not bypass:
             return G.block(_why_blocked(work_dir, files, big, critical, reviewers, cfg))
 
+        unseen = unseen_adds(pending_adds.get(work_dir, []), work_dir)
+        if unseen:
+            return G.block(
+                "🛑 Гейт коммита: в одной команде и `git add`, и обход `REVIEW_DONE=1`.\n\n"
+                "Добавляется то, чего в проверенном диффе нет: "
+                + ", ".join(sorted(unseen)[:5]) + "\n\n"
+                "Расписка подтверждает дифф БЕЗ этих файлов: перехватчик видит дерево до "
+                "выполнения, а новый файл в дифф не попадает, пока git о нём не знает.\n\n"
+                "Разделите: сначала `git add <файлы>` отдельной командой, затем ревью, "
+                "затем коммит."
+            )
+
         ok, problems = G.check_receipts(files, work_dir, cfg)
         if ok:
-            return 0
+            continue
         return G.block(
             "🛑 Гейт коммита: REVIEW_DONE=1 не принят — нет доказательства ревью.\n\n"
             f"Проверенное дерево: {work_dir}\n\n"
@@ -93,6 +129,134 @@ def main() -> int:
     return 0
 
 
+# Только флаги с ОБЯЗАТЕЛЬНЫМ значением. `-S` / `--gpg-sign` сюда не входят:
+# у них значение необязательное и пишется слитно (`-Sключ`), а в списке они
+# съедали бы следующий токен — и `git commit -S -am x` терял свой `-a`.
+COMMIT_VALUE_FLAGS = {"-m", "-F", "-C", "-c", "--message", "--file", "--author",
+                      "--date", "--reuse-message", "--reedit-message", "--fixup",
+                      "--squash", "--cleanup"}
+
+
+def commits_all(args: list[str]) -> bool:
+    """Есть ли у `git commit` флаг «взять всё изменённое» — в любом написании.
+
+    Слитные формы (`-am`, `-va`) встречаются чаще раздельных, поэтому проверка
+    идёт по буквам, а не по точному совпадению токена.
+
+    Значения флагов пропускаются: иначе сообщение коммита, начинающееся с
+    дефиса (`git commit -m '-a quick fix'`), читается как флаг `-a`, и гейт
+    считает файлы всего дерева вместо индекса. Направление ошибки безопасное,
+    но отказ получается необъяснимым, а такие отказы учатся обходить.
+    """
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok in COMMIT_VALUE_FLAGS:
+            i += 2
+            continue
+        if tok.startswith("--"):
+            if tok == "--all":
+                return True
+            i += 1
+            continue
+        if tok.startswith("-") and tok != "-":
+            if "a" in tok[1:]:
+                return True
+            i += 1
+            continue
+        # Первое непозиционное слово — путь; дальше флагов «взять всё» нет.
+        break
+    return False
+
+
+def has_pathspec(args: list[str]) -> bool:
+    """Есть ли у `git commit` позиционный путь.
+
+    `git commit -m x файл.py` коммитит содержимое дерева по этому пути мимо
+    индекса — для гейта это ровно тот же случай, что и `-a`.
+    """
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok == "--":
+            return i + 1 < len(args)
+        if tok in COMMIT_VALUE_FLAGS:
+            i += 2
+            continue
+        if tok.startswith("-") and tok != "-":
+            i += 1
+            continue
+        return True
+    return False
+
+
+ADD_SCOPE_UNKNOWN = "<весь индекс>"
+# Формы `git add`, которые берут только уже отслеживаемые файлы и по
+# определению не могут внести в коммит ничего, чего ревьюер не видел.
+ADD_TRACKED_ONLY = {"-u", "--update", "-p", "--patch", "-i", "--interactive"}
+
+
+def collect_adds(segments: list[str], session_dir: str, shell_cwd: str) -> dict[str, list[str]]:
+    """Что каждый `git add` в этой команде собирается положить в индекс.
+
+    Разложено по деревьям: `git -C /другая/копия add x` к текущему гейту
+    отношения не имеет, и запрещать из-за него — ложное срабатывание.
+
+    Пути сразу приводятся к виду «от корня репозитория». В команде они
+    записаны относительно каталога ОБОЛОЧКИ, а git отдаёт список изменённых
+    файлов от корня дерева — без приведения сравнение шло в разных системах
+    координат, и `git add a.txt` из подкаталога блокировался, хотя этот файл
+    в проверенном диффе есть.
+    """
+    out: dict[str, list[str]] = {}
+    for segment in segments:
+        parsed = G.parse_git(G.tokenize(segment))
+        # `git stage` — синоним `git add`; отдельный список синонимов не заводим,
+        # но сам синоним обязан учитываться, иначе им и обходят.
+        if not parsed or parsed.get("subcommand") not in ("add", "stage"):
+            continue
+        work_dir = parsed_dir(parsed, session_dir)
+        args = parsed.get("args", [])
+        if any(a in ADD_TRACKED_ONLY for a in args):
+            continue
+        base = G.git_dash_c_dir(parsed) or shell_cwd or work_dir
+        paths = [to_repo_path(a, base, work_dir) for a in args if not a.startswith("-")]
+        out.setdefault(work_dir, []).extend(paths or [ADD_SCOPE_UNKNOWN])
+    return out
+
+
+def to_repo_path(path: str, base: str, work_dir: str) -> str:
+    try:
+        absolute = path if os.path.isabs(path) else os.path.join(base, path)
+        rel = os.path.relpath(os.path.realpath(absolute), os.path.realpath(work_dir))
+    except (OSError, ValueError):
+        return os.path.normpath(path)
+    return os.path.normpath(rel)
+
+
+def unseen_adds(paths: list[str], work_dir: str) -> list[str]:
+    """Из добавляемого — то, чего в проверенном диффе ещё нет.
+
+    Покрытым считается ТОЛЬКО точное совпадение с уже изменённым файлом:
+    повторный `git add` такого файла ничего к диффу не добавляет, и мешать
+    ему — трение без выигрыша.
+
+    Каталог покрытым не считается НИКОГДА. Соблазн засчитать его, если внутри
+    есть хоть один проверенный файл, велик и ошибочен: `git add критичный/`
+    протащит рядом лежащий новый файл, которого ревьюер не видел, — то есть
+    ровно то, ради чего проверка написана, только записанное короче.
+    """
+    if not paths:
+        return []
+    known = {os.path.normpath(p) for p in G.changed_files(work_dir)}
+    unseen = []
+    for p in paths:
+        if p in known and not os.path.isdir(os.path.join(work_dir, p)):
+            continue
+        unseen.append(p)
+    return unseen
+
+
 def parsed_dir(parsed: dict, fallback: str) -> str:
     d = G.git_dash_c_dir(parsed)
     if d and os.path.isdir(d):
@@ -103,7 +267,7 @@ def parsed_dir(parsed: dict, fallback: str) -> str:
 def _why_blocked(work_dir, files, big, critical, reviewers, cfg) -> str:
     reasons = []
     if big:
-        reasons.append(f"файлов в индексе: {len(files)} (порог {cfg['commit_gate']['max_files']})")
+        reasons.append(f"файлов в коммите: {len(files)} (порог {cfg['commit_gate']['max_files']})")
     if critical:
         reasons.append("затронуты критические пути: " + ", ".join(sorted(critical)[:5]))
     red = [f for f in files if G.is_red_zone(f, cfg)]

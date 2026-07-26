@@ -19,7 +19,6 @@
 from __future__ import annotations
 
 import os
-import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
@@ -35,7 +34,10 @@ def main() -> int:
         return 0
 
     cfg = G.load_config()
-    if not any(re.search(p, command) for p in cfg["pr_merge_patterns"]):
+    # Совпадение — от начала сегмента, а не где угодно в строке: иначе
+    # `gh  pr merge` (два пробела) проходит мимо, а безобидное
+    # `echo "gh pr merge"` наоборот блокируется.
+    if not G.invocations(command, cfg["pr_merge_patterns"]):
         return 0
 
     work_dir = G.resolve_work_dir(data.get("cwd"))
@@ -111,9 +113,15 @@ def main() -> int:
 
 
 def _inline_env(command: str) -> bool:
-    """MERGE_REVIEW_DONE=1 может стоять прямо перед командой."""
-    for segment in G.split_segments(command):
-        _tokens, env = G.strip_env_prefix(G.tokenize(segment))
+    """MERGE_REVIEW_DONE=1 может стоять прямо перед командой.
+
+    Разбор идёт через снятие обёрток, а не только присваиваний: у
+    `env MERGE_REVIEW_DONE=1 gh pr merge` присваивание стоит ПОСЛЕ обёртки, и
+    иначе обход просто не был бы распознан — человек написал бы рабочую с виду
+    команду и получил отказ без объяснения.
+    """
+    for segment in G.expand_segments(command):
+        _tokens, env = G.peel_wrappers(G.tokenize(segment))
         if env.get("MERGE_REVIEW_DONE") == "1":
             return True
     return False
