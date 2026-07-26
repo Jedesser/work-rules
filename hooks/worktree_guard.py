@@ -23,9 +23,15 @@
 выход с кодом 2.
 
 Оболочка проверяется наравне с редактором. Иначе изоляция держится на том,
-что агент ДОБРОВОЛЬНО выбрал инструмент правки: `cat > файл`, `cp`, любой
-форматтер или генератор кода из оболочки пишут в ту же общую копию, а
-запрет на редактор при этом создаёт впечатление работающей защиты.
+что агент ДОБРОВОЛЬНО выбрал инструмент правки: `cat > файл`, `cp`, `git
+checkout` из оболочки пишут в ту же общую копию, а запрет на редактор при
+этом создаёт впечатление работающей защиты.
+
+Охват честно неполный: ловятся перенаправления, известные пишущие утилиты и
+подкоманды git, меняющие дерево. Форматтер, генератор кода или установщик
+зависимостей (`gofmt -w .`, `npm ci`) правят файлы сами, и опознать их по
+имени нельзя — список получился бы бесконечным и всё равно дырявым. Это
+слой, снижающий вероятность, а не доказательство.
 
 Регистрация: PreToolUse, matcher "Edit|Write|MultiEdit|NotebookEdit|Bash".
 """
@@ -33,6 +39,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
@@ -72,15 +79,45 @@ def is_under(target: str, root: str) -> bool:
 # Команды, которые пишут в файловую систему. Список нарочно короткий и
 # состоит из того, чем правят код и файлы проекта: длинный список из всего,
 # что теоретически умеет писать, ловил бы обычное чтение и был бы выключен.
-WRITING_COMMANDS = {
-    "cp", "mv", "rm", "rmdir", "mkdir", "touch", "install", "dd", "truncate",
-    "ln", "chmod", "chown", "tee", "patch", "rsync", "unzip", "tar",
-}
+# ВСЕ позиционные аргументы — цели записи.
+WRITING_COMMANDS = {"rm", "rmdir", "mkdir", "touch", "truncate", "chmod",
+                    "chown", "patch", "tee", "dd"}
+# У этих пишется ТОЛЬКО последний позиционный, остальные — источники. Без
+# такого разделения `cp <общая>/a.txt /tmp/b.txt` (обычное чтение) получал бы
+# отказ, а `ln -s <общая>/node_modules node_modules` — рекомендованный способ
+# переиспользовать зависимости — становился невозможен.
+WRITING_LAST_ARG = {"cp", "mv", "ln", "rsync", "install"}
+# Архиваторы: цель задаётся флагом (`-C` куда распаковывать, `-f` какой файл
+# создавать), а позиционные — это, наоборот, что читать.
+ARCHIVE_DEST_FLAGS = {"tar": ("-C", "--directory", "-f", "--file"),
+                      "unzip": ("-d",), "zip": ("-O", "--out")}
+
 # Подкоманды git, меняющие рабочее дерево. `git commit` сюда не входит: он
 # меняет историю, а не файлы, и у него свой гейт.
 WRITING_GIT = {"checkout", "switch", "restore", "apply", "stash", "clean",
-               "reset", "merge", "pull", "cherry-pick", "revert", "am"}
-REDIRECT_TOKENS = (">", ">>", ">|")
+               "reset", "merge", "pull", "cherry-pick", "revert", "am",
+               "rm", "mv", "submodule", "sparse-checkout"}
+# Режимы тех же подкоманд, которые ничего не меняют. Без этого `git stash list`
+# и `git clean -n` (сухой прогон — как раз способ ПОСМОТРЕТЬ, что удалится)
+# получают отказ, и защита начинает мешать обычной работе.
+READONLY_GIT_ARGS = {"list", "show", "-n", "--dry-run", "--check", "--stat",
+                     "--summary", "status"}
+
+# Перенаправление в файл: `>`, `>>`, `>|`, с необязательным номером потока
+# (`2>`, `2>>`) и без пробела перед именем (`cat>файл`). Токенизация здесь не
+# помогает — оболочка склеивает это в одно слово, а номер потока делает токен
+# непохожим ни на один известный оператор.
+REDIRECT_RE = re.compile(
+    r"""(?<![-<>=])(?:\d+|&)?(>{1,2}\|?)\s*("[^"]*"|'[^']*'|[^\s;&|=][^\s;&|]*)""")
+
+
+def _redirect_targets(segment: str, seg_dir: str) -> list[tuple[str, str]]:
+    out = []
+    for op, raw in REDIRECT_RE.findall(segment):
+        path = raw.strip("\"'")
+        if path and not path.startswith("&"):   # `2>&1` — это поток, не файл
+            out.append((f"перенаправление {op}", normalize(path, seg_dir)))
+    return out
 
 
 def bash_targets(command: str, base: str) -> list[tuple[str, str]]:
@@ -102,32 +139,36 @@ def bash_targets(command: str, base: str) -> list[tuple[str, str]]:
         name = os.path.basename(peeled[0])
         parsed = G.parse_git(tokens)
 
-        writes = name in WRITING_COMMANDS
-        if parsed and parsed.get("subcommand") in WRITING_GIT:
-            writes = True
-            seg_dir = G.git_dash_c_dir(parsed) or seg_dir
-
         # Перенаправление пишет независимо от того, что за команда слева.
-        for i, tok in enumerate(tokens):
-            for op in REDIRECT_TOKENS:
-                if tok == op and i + 1 < len(tokens):
-                    found.append((f"перенаправление {op}", normalize(tokens[i + 1], seg_dir)))
-                elif tok.startswith(op) and len(tok) > len(op):
-                    found.append((f"перенаправление {op}", normalize(tok[len(op):], seg_dir)))
+        found.extend(_redirect_targets(segment, seg_dir))
 
-        if not writes:
+        if parsed:
+            sub = parsed.get("subcommand")
+            args = parsed.get("args", [])
+            if sub not in WRITING_GIT or any(a in READONLY_GIT_ARGS for a in args):
+                continue
+            git_dir = G.git_dash_c_dir(parsed) or seg_dir
+            targets = [a for a in args if not a.startswith("-")]
+            if not targets:
+                # `git checkout` без путей меняет всё дерево целиком.
+                found.append((f"`git {sub}` меняет дерево", normalize(git_dir)))
+            found.extend((f"аргумент `git {sub}`", normalize(a, git_dir)) for a in targets)
             continue
+
         # Проверяются ИМЕННО пути аргументов, а не каталог сегмента: `rm /tmp/x`
         # из общей копии ничего в ней не меняет, и отказ на нём — ложный.
         # Относительный путь normalize() и так привяжет к каталогу сегмента.
-        targets = [a for a in peeled[1:] if not a.startswith("-")]
-        if parsed:
-            targets = [a for a in parsed.get("args", []) if not a.startswith("-")]
-            # `git checkout` без путей меняет всё дерево целиком.
-            if not targets:
-                found.append((f"`git {parsed['subcommand']}` меняет дерево", normalize(seg_dir)))
-        for arg in targets:
-            found.append((f"аргумент `{name}`", normalize(arg, seg_dir)))
+        positional = [a for a in peeled[1:] if not a.startswith("-")]
+        if name in ARCHIVE_DEST_FLAGS:
+            flags = ARCHIVE_DEST_FLAGS[name]
+            for i, tok in enumerate(peeled):
+                if tok in flags and i + 1 < len(peeled):
+                    found.append((f"цель `{name}`", normalize(peeled[i + 1], seg_dir)))
+        elif name in WRITING_LAST_ARG:
+            if positional:
+                found.append((f"цель `{name}`", normalize(positional[-1], seg_dir)))
+        elif name in WRITING_COMMANDS:
+            found.extend((f"аргумент `{name}`", normalize(a, seg_dir)) for a in positional)
     return found
 
 

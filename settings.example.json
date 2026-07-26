@@ -25,7 +25,7 @@
           { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/guard_bash.py", "timeout": 20 },
           { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/guard_resources.py", "timeout": 5 },
           { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/commit_gate.py", "timeout": 60 },
-          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/merge_gate.py", "timeout": 70 },
+          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/merge_gate.py", "timeout": 130 },
           { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/plan_gate.py", "timeout": 40 },
           { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/issue_link_gate.py", "timeout": 60 },
           { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/worktree_freshness.py", "timeout": 40 }

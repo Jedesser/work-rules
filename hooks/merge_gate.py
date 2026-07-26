@@ -58,7 +58,46 @@ def main() -> int:
     return 0
 
 
-PR_TARGET_RE = re.compile(r"^(\d+|https?://\S+)$")
+# Флаги команды мержа, забирающие значение отдельным словом. Без этого
+# `gh pr merge --body 123` принимает `123` за номер PR и отказывает по
+# причине, которой в команде нет.
+MERGE_VALUE_FLAGS = {"-b", "--body", "-t", "--subject", "--body-file", "-F",
+                     "--match-head-commit", "-R", "--repo", "--author-email"}
+# Номер PR внутри сырого вызова API: `gh api -X PUT repos/o/r/pulls/7/merge`.
+API_PR_RE = re.compile(r"\bpulls/(\d+)/merge\b")
+# Нераскрытая подстановка — цель, которую нельзя проверить в принципе.
+UNRESOLVED_RE = re.compile(r"[$`]")
+
+
+def merge_target(tokens: list[str]) -> str | None:
+    """Что именно велено слить: номер, ссылка ИЛИ ИМЯ ВЕТКИ.
+
+    Ветка — третья равноправная форма записи у `gh pr merge`, и проверка,
+    знающая только номер и ссылку, оставляет дыру ровно того же размера,
+    какую закрывает: `gh pr merge чужая-ветка` сливает чужую работу под
+    свою расписку.
+    """
+    for tok in tokens:
+        m = API_PR_RE.search(tok)
+        if m:
+            return m.group(1)
+    i = 0
+    seen_verb = False
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in MERGE_VALUE_FLAGS:
+            i += 2
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        if not seen_verb:
+            # `gh pr merge` / `glab mr merge` — сама команда, не цель.
+            seen_verb = tok in ("merge",)
+            i += 1
+            continue
+        return tok
+    return None
 
 
 def check_target(segment: str, work_dir: str) -> int:
@@ -74,20 +113,27 @@ def check_target(segment: str, work_dir: str) -> int:
     аргумент.
     """
     tokens, _env = G.peel_wrappers(G.tokenize(segment))
-    targets = [t for i, t in enumerate(tokens)
-               if i > 0 and not t.startswith("-") and PR_TARGET_RE.match(t)]
-    if not targets:
+    if not tokens or os.path.basename(tokens[0]) != "gh":
+        # Резолвер здесь один — `gh`. Спрашивать им про GitLab бессмысленно:
+        # получился бы вечный отказ с советом, не относящимся к делу. Для
+        # другого хостинга допишите свой резолвер рядом с _pr_head.
+        return 0
+    target = merge_target(tokens)
+    if target is None:
         return 0        # цель не названа — сольётся PR текущей ветки
+    if UNRESOLVED_RE.search(target):
+        return G.block(
+            f"🛑 Гейт мержа: цель «{target}» подставляется оболочкой и до проверки "
+            "не доходит.\n\nГейт не может убедиться, что сливается именно та ветка, "
+            "дифф которой он посмотрел. Напишите цель явно или слейте PR из его "
+            "собственной рабочей копии, без аргумента."
+        )
 
     branch = G.current_branch(work_dir)
-    code, _top = G.git(["rev-parse", "--show-toplevel"], work_dir)
-    if code != 0:
-        return G.block("🛑 Гейт мержа: не удалось определить рабочую копию.")
-
-    head = _pr_head(targets[0], work_dir)
+    head = _pr_head(target, work_dir)
     if head is None:
         return G.block(
-            f"🛑 Гейт мержа: не удалось выяснить, какая ветка стоит за «{targets[0]}».\n\n"
+            f"🛑 Гейт мержа: не удалось выяснить, какая ветка стоит за «{target}».\n\n"
             "Гейт считает файлы, критические пути и расписки по ТЕКУЩЕЙ ветке. Если "
             "команда сливает другой PR, расписка на свою работу авторизовала бы "
             "мерж чужой, никем не смотренной.\n\n"
@@ -97,7 +143,7 @@ def check_target(segment: str, work_dir: str) -> int:
         return G.block(
             f"🛑 Гейт мержа: сливается не та ветка, дифф которой проверен.\n\n"
             f"  Проверено:  {branch} (дерево {work_dir})\n"
-            f"  Сливается:  {head} (цель «{targets[0]}»)\n\n"
+            f"  Сливается:  {head} (цель «{target}»)\n\n"
             "Расписка привязана к диффу проверенного дерева и на чужой PR не "
             "распространяется.\n\n"
             "Перейдите в рабочую копию того PR и слейте его оттуда."

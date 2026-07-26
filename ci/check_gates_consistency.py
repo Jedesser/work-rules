@@ -434,6 +434,25 @@ def main() -> int:
             "tool_input": {"command": "MERGE_REVIEW_DONE=1 gh pr merge 12345 --merge"}}, repo)
         check("мерж чужого PR по номеру не проходит по своей расписке",
               code == 2 and "какая ветка стоит" in err, err[:160])
+        # Имя ветки — третья равноправная запись той же цели.
+        code, _o, err = run_hook("merge_gate.py", {
+            "tool_name": "Bash", "cwd": str(repo),
+            "tool_input": {"command": "MERGE_REVIEW_DONE=1 gh pr merge чужая-ветка --merge"}}, repo)
+        check("мерж чужого PR по имени ветки не проходит",
+              code == 2 and "какая ветка стоит" in err, err[:160])
+        # Нераскрытая подстановка — цель, которую проверить нельзя в принципе.
+        code, _o, err = run_hook("merge_gate.py", {
+            "tool_name": "Bash", "cwd": str(repo),
+            "tool_input": {"command": "MERGE_REVIEW_DONE=1 gh pr merge $PR --merge"}}, repo)
+        check("нераскрытая подстановка в цели мержа отклоняется",
+              code == 2 and "подставляется оболочкой" in err, err[:160])
+        # Значение флага — не цель: иначе отказ приходит с причиной, которой
+        # в команде нет, а такие отказы учатся обходить.
+        code, _o, err = run_hook("merge_gate.py", {
+            "tool_name": "Bash", "cwd": str(repo),
+            "tool_input": {"command": "gh pr merge --body 123 --merge"}}, repo)
+        check("значение флага не принимается за номер PR",
+              "какая ветка стоит" not in err, err[:160])
         write_config(repo)
 
         print("\n8. Предполётная проверка ревьюера")
@@ -788,6 +807,20 @@ def main() -> int:
             ("поиск в общей копии разрешён", f"grep -rn foo {shared}", mine, 0),
             ("запись в своей копии разрешена", f"cat > {mine}/x.txt", mine, 0),
             ("удаление вне копий из её каталога разрешено", "rm /tmp/x.txt", shared, 0),
+            # Формы записи перенаправления, которые токенизация не различает.
+            ("поток ошибок в общую копию", f"make 2> {shared}/err.log", mine, 2),
+            ("перенаправление без пробела", f"cat>{shared}/x.txt", mine, 2),
+            ("дописывание вне копий из её каталога", "echo x >> /tmp/log.txt", shared, 0),
+            # Источник и цель у копирующих команд — разные вещи.
+            ("копирование ИЗ общей копии разрешено", f"cp {shared}/a.txt /tmp/b.txt", mine, 0),
+            ("ссылка НА общую копию разрешена", f"ln -s {shared}/node_modules nm", mine, 0),
+            ("распаковка В общую копию", f"tar -xf /tmp/a.tar -C {shared}", mine, 2),
+            ("чтение архива ИЗ общей копии разрешено", f"tar -cf /tmp/a.tar {shared}", mine, 0),
+            # git: читающие режимы не мешаем, меняющие дерево — ловим.
+            ("`git stash list` в общей копии разрешён", f"git -C {shared} stash list", mine, 0),
+            ("`git clean -n` в общей копии разрешён", f"git -C {shared} clean -n", mine, 0),
+            ("`git rm` в общей копии", f"git -C {shared} rm a.txt", mine, 2),
+            ("`git mv` в общей копии", f"git -C {shared} mv a.txt b.txt", mine, 2),
         ):
             code, _o, err = run_hook("worktree_guard.py", {
                 "tool_name": "Bash", "cwd": str(cwd),
@@ -805,7 +838,7 @@ def main() -> int:
     # (дешёвых запросов, полных диффов ветки) на один прогон — считано по коду.
     BUDGET = {
         "guard_bash.py": (2, 0), "guard_resources.py": (0, 0),
-        "commit_gate.py": (5, 2), "merge_gate.py": (3, 3),
+        "commit_gate.py": (5, 2), "merge_gate.py": (3, 3, 1),
         "plan_gate.py": (4, 1), "issue_link_gate.py": (5, 2),
         "worktree_guard.py": (0, 0), "preflight_review_guard.py": (3, 1),
         "review_churn_warn.py": (2, 0), "subagent_receipt.py": (3, 1),
@@ -815,8 +848,14 @@ def main() -> int:
         for entry in group:
             for hook in entry["hooks"]:
                 registered[hook["command"].rsplit("/", 1)[-1]] = hook["timeout"]
-    for name, (c, h) in BUDGET.items():
-        ceiling = c * cheap + h * heavy
+    # Третье число — вызовы ВНЕШНЕГО инструмента (`gh`). У гейта мержа их два:
+    # проверка цели работает по каждому вызову мержа в команде. Сеть медленнее
+    # локального git, и без учёта этого рантайм успевает убить хук раньше
+    # ответа — а убитый хук означает РАЗРЕШЁННОЕ действие.
+    external = 20
+    for name, budget in BUDGET.items():
+        c, h, *rest = budget
+        ceiling = c * cheap + h * heavy + (rest[0] if rest else 0) * 2 * external
         got = registered.get(name)
         check(f"регистрация {name} ≥ потолка {ceiling}с",
               got is not None and got >= ceiling, f"зарегистрирован {got}")
