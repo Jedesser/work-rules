@@ -524,7 +524,15 @@ def main() -> int:
             "while true; do git rebase main; done",
             # `:/` и `*` — то же самое, что `-A`, только другими словами.
             "git add :/",
+            "git add :/.",
+            "git add ':(top)'",
             "git add '*'",
+            # `time` — обёртка со своими флагами, а не служебное слово: если
+            # выбросить само слово, головой сегмента станет флаг, и запрет
+            # снимается одной приставкой.
+            "time -p git push --force origin feature",
+            "time -p git rebase main",
+            "time -o log git push --force origin feature",
         ]
         allowed = [
             "git merge origin/main",
@@ -552,6 +560,8 @@ def main() -> int:
             # Скобка внутри сообщения — не группировка.
             "git commit -m 'fix: правка (важная)'",
             'echo "(git rebase main)"',
+            # Путь от корня репозитория — конкретный файл, а не «добавить всё».
+            "git add :/docs/readme.md",
         ]
         # Отправка без явной ветки запрещена только ИЗ основной ветки — а это
         # значит, что на обычной ветке та же команда обязана проходить.

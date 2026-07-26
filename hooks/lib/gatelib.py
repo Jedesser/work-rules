@@ -780,9 +780,12 @@ DURATION_RE = re.compile(r"^\d+(?:\.\d+)?[smhd]?$")
 # «это не git», и мимо проходит ВСЯ защита — включая запрет переписывания
 # истории. Записи вида `(git commit …)`, `{ git commit …; }`,
 # `for … do git commit … done`, `if …; then git commit …; fi` — не экзотика.
+# `time` сюда НЕ входит: он уже разбирается как обёртка вместе со своими
+# флагами (WRAPPER_COMMANDS), а простое выбрасывание слова оставляло бы
+# головой сегмента флаг `-p`, и `time -p git push --force` проходил бы мимо
+# всех запретов разом.
 SHELL_KEYWORDS = {"if", "then", "elif", "else", "fi", "do", "done", "while",
-                  "until", "for", "case", "esac", "in", "select", "function",
-                  "time", "!", ";"}
+                  "until", "for", "case", "esac", "select", "function", "!"}
 GROUPING_CHARS = "({!"
 
 
@@ -806,7 +809,7 @@ def strip_shell_syntax(tokens: list[str]) -> list[str]:
             break
         opened += len(head) - len(trimmed)
         out = ([trimmed] if trimmed else []) + out[1:]
-    while opened and out:
+    while opened > 0 and out:
         tail = out[-1]
         trimmed = tail.rstrip(");}")
         if trimmed == tail:
