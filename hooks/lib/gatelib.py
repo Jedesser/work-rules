@@ -114,7 +114,21 @@ DEFAULT_CONFIG: dict = {
         ],
     },
 
-    "git_timeout": 10,
+    # Потолок на ОДИН вызов git. Держите его согласованным с таймаутом, с
+    # которым перехватчик зарегистрирован в рантайме: если рантайм убьёт хук
+    # раньше, чем тот успеет ответить, действие будет РАЗРЕШЕНО — и гейт,
+    # объявленный «падающим закрыто», на деле окажется падающим открыто.
+    # Потолок считается по числу РАЗЛИЧНЫХ запросов: повторы бесплатны, их
+    # кеширует git(). Дешёвые запросы (корень дерева, ветка, точка ветвления,
+    # `diff --cached`, `diff HEAD`) идут по git_timeout, полные диффы ветки —
+    # по git_diff_timeout. Соотношение «регистрация ≥ потолка» проверяется в
+    # ci/check_gates_consistency.py по явной таблице бюджетов: без неё числа
+    # здесь и в settings.example.json разъезжаются молча, а расплата —
+    # убитый по таймауту гейт, то есть РАЗРЕШЁННОЕ действие.
+    "git_timeout": 5,
+    # Полный дифф ветки кратно дороже остальных запросов: на большой ветке
+    # общий потолок превратился бы в «не удалось посчитать отпечаток».
+    "git_diff_timeout": 15,
 }
 
 _CONFIG_CACHE: dict | None = None
@@ -158,13 +172,38 @@ def load_config() -> dict:
 # ---------------------------------------------------------------------------
 
 
-def git(args: list[str], cwd: str, timeout: int | None = None) -> tuple[int, str]:
+_GIT_CACHE: dict[tuple, tuple[int, str]] = {}
+
+
+def git(args: list[str], cwd: str, timeout: int | None = None, cache: bool = True) -> tuple[int, str]:
     """Запускает git и возвращает (код возврата, stdout).
 
     Никогда не бросает исключение: любая беда превращается в (1, "") —
     решение о том, «падать открыто» или «падать закрыто», принимает
     вызывающий, а не эта функция.
+
+    Результат кешируется на время одного запуска перехватчика — но только у
+    ЧИТАЮЩИХ запросов. Изменяющие (единственный такой в комплекте — `fetch`)
+    передают cache=False явно: кеш здесь держится на том, что повтор запроса
+    даёт тот же ответ, и молча распространить это на запись значит подложить
+    мину следующему, кто добавит сюда вызов. Смысл не в скорости: без него число вызовов git росло
+    ЛИНЕЙНО по числу команд в строке (четыре коммита в одной строке — под
+    полтора десятка вызовов), а общее время упиралось в таймаут, с которым
+    перехватчик зарегистрирован. Рантайм убивает его по таймауту — и
+    действие РАЗРЕШАЕТСЯ: гейт, объявленный падающим закрыто, на деле
+    оказывается падающим открыто ровно на самых длинных командах.
     """
+    if not cache:
+        return _git_uncached(args, cwd, timeout)
+    key = (tuple(args), os.path.realpath(cwd) if cwd else "", timeout)
+    if key in _GIT_CACHE:
+        return _GIT_CACHE[key]
+    result = _git_uncached(args, cwd, timeout)
+    _GIT_CACHE[key] = result
+    return result
+
+
+def _git_uncached(args: list[str], cwd: str, timeout: int | None = None) -> tuple[int, str]:
     cfg_timeout = timeout if timeout is not None else load_config()["git_timeout"]
     try:
         p = subprocess.run(
@@ -195,7 +234,11 @@ def resolve_work_dir(cwd: str | None = None) -> str:
 
 
 def merge_base(work_dir: str, base_ref: str | None = None) -> str | None:
-    """Точка ветвления текущей ветки от базовой. None — если не вышло."""
+    """Точка ветвления текущей ветки от базовой. None — если не вышло.
+
+    Повторные вызовы бесплатны: кеш живёт в git() (см. там же — почему это
+    не оптимизация, а условие того, что гейт вообще успеет ответить).
+    """
     ref = base_ref or load_config()["base_ref"]
     code, out = git(["merge-base", ref, "HEAD"], work_dir)
     if code != 0 or not out.strip():
@@ -223,7 +266,7 @@ def compute_diff_sha(work_dir: str, base_ref: str | None = None) -> str | None:
     base = merge_base(work_dir, base_ref)
     if base is None:
         return None
-    code, out = git(["diff", base], work_dir, timeout=30)
+    code, out = git(["diff", base], work_dir, load_config()["git_diff_timeout"])
     if code != 0:
         return None
     return hashlib.sha256(out.encode("utf-8", "replace")).hexdigest()
@@ -234,7 +277,8 @@ def changed_files(work_dir: str, base_ref: str | None = None) -> list[str]:
     base = merge_base(work_dir, base_ref)
     if base is None:
         return []
-    code, out = git(["diff", "--name-only", base], work_dir, timeout=30)
+    code, out = git(["diff", "--name-only", base], work_dir,
+                    load_config()["git_diff_timeout"])
     if code != 0:
         return []
     return [ln for ln in out.splitlines() if ln.strip()]
@@ -247,11 +291,25 @@ def staged_files(work_dir: str) -> list[str]:
     return [ln for ln in out.splitlines() if ln.strip()]
 
 
+def uncommitted_files(work_dir: str) -> list[str]:
+    """Отслеживаемые файлы, изменённые относительно последнего коммита.
+
+    Ровно то, что заберёт `git commit -a`. Точка ветвления здесь не годится:
+    она включает всё, что уже закоммичено на ветке, и гейт начинает считать
+    чужие файлы своими — отказ выглядит абсурдно и его перестают уважать.
+    """
+    code, out = git(["diff", "--name-only", "HEAD"], work_dir)
+    if code != 0:
+        return []
+    return [ln for ln in out.splitlines() if ln.strip()]
+
+
 def added_lines(work_dir: str, base_ref: str | None = None) -> int:
     base = merge_base(work_dir, base_ref)
     if base is None:
         return 0
-    code, out = git(["diff", "--numstat", base], work_dir, timeout=30)
+    code, out = git(["diff", "--numstat", base], work_dir,
+                    load_config()["git_diff_timeout"])
     if code != 0:
         return 0
     total = 0
@@ -394,12 +452,44 @@ def is_background_launch(tool_response) -> bool:
     return "Async agent launched" in blob
 
 
+RECEIPT_TAIL_RE = re.compile(r"^\d+-[0-9a-f]{6,64}$")
+
+
+def receipt_belongs_to(fname: str, name: str) -> bool:
+    """Расписка ли это ИМЕННО этого ревьюера.
+
+    Проверка суффикса обязана быть строгой: простое «имя файла начинается с
+    `<имя>-`» означает, что расписка ревьюера `change-reviewer-deep`
+    удовлетворит требование к `change-reviewer`. Любая конфигурация, где одно
+    имя является префиксом другого, тихо понижала бы более строгое требование
+    до более слабого — а заметить это можно только по последствиям.
+
+    Хвост — метка времени и начало отпечатка диффа: `<имя>-<секунды>-<хеш>`.
+    Обе части обязательны: с необязательным хешем расписка ревьюера с именем
+    `reviewer-2` («вторая полоса») засчиталась бы ревьюеру `reviewer` — тот же
+    класс тихого понижения требований, ради которого проверка и написана.
+    """
+    if not fname.startswith(f"{name}-"):
+        return False
+    return bool(RECEIPT_TAIL_RE.match(fname[len(name) + 1:]))
+
+
 def write_receipt(name: str, work_dir: str, diff_sha: str) -> str:
+    """Кладёт расписку в файл `<имя ревьюера>-<секунды>-<начало отпечатка>`.
+
+    Отпечаток в имени не украшение: без него две расписки одного ревьюера,
+    выписанные в одну и ту же секунду, — это один и тот же путь, и вторая молча
+    затирает первую. Гейт от этого не страдает (ему хватает любой подходящей),
+    а вот счётчик повторных кругов ревью недосчитывается версий и молчит там,
+    где обязан предупредить.
+    """
     branch = current_branch(work_dir)
     d = receipts_dir(repo_name(), branch)
     os.makedirs(d, exist_ok=True)
-    path = os.path.join(d, f"{name}-{int(time.time())}")
-    tmp = os.path.join(d, f".{name}-{int(time.time())}.tmp")
+    ts = int(time.time())
+    stem = f"{name}-{ts}-{diff_sha[:12]}"
+    path = os.path.join(d, stem)
+    tmp = os.path.join(d, f".{stem}.tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(diff_sha + "\n")
     os.replace(tmp, path)  # атомарно: гейт не увидит недописанный файл
@@ -422,7 +512,7 @@ def find_receipt(name: str, diff_sha: str, cfg: dict | None = None) -> str | Non
     stale_found = False
     for branch_dir, _dirs, files in os.walk(root):
         for fname in files:
-            if not fname.startswith(f"{name}-"):
+            if not receipt_belongs_to(fname, name):
                 continue
             full = os.path.join(branch_dir, fname)
             try:
@@ -480,12 +570,128 @@ GIT_FLAGS_WITH_VALUE = {
 }
 
 
+SEGMENT_SEPARATORS = ";|&\n\r"
+
+# Открытие вложенного документа: `<<EOF`, `<<-'EOF'`, `<< "EOF"`.
+# Тройной `<<<` — это строка-аргумент, а не документ, и сюда не попадает.
+HEREDOC_RE = re.compile(r"(?<!<)<<-?[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1(?!<)")
+
+# Перенос длинной команды на следующую строку. Склеивается ДО всего
+# остального: иначе строка режется по переводу строки прямо посреди команды,
+# и на первой строке остаётся глагол, а все флаги — на следующих. Тогда
+# `git push \<перенос> --force` выглядит как безобидный `git push`, и это
+# не теоретическая лазейка, а обычный способ записи длинной команды.
+LINE_CONTINUATION_RE = re.compile(r"\\\r?\n[ \t]*")
+
+
+def _heredoc_openers(line: str, in_s: bool, in_d: bool) -> tuple[list[tuple[str, bool]], bool, bool]:
+    """Открытия вложенных документов В ЭТОЙ строке — только вне кавычек.
+
+    Возвращает список (ограничитель, тело_исполняется) и состояние кавычек
+    на конец строки: кавычка может открыться в одной строке и закрыться в
+    другой, и без переноса состояния разбор поедет.
+    """
+    found: list[tuple[str, bool]] = []
+    # Оболочку ищем в ЛЮБОЙ команде строки, а не только в первой: у
+    # `git status && bash <<'EOF'` первое слово строки — `git`, и проверка по
+    # нему объявила бы тело данными. Обёртки снимаются по той же причине
+    # (`env bash <<'EOF'`).
+    executable = False
+    for part in _raw_segments(line):
+        peeled, _env = peel_wrappers(tokenize(part))
+        if peeled and os.path.basename(peeled[0]) in SHELL_COMMANDS:
+            executable = True
+            break
+    i, n = 0, len(line)
+    while i < n:
+        ch = line[i]
+        if ch == "\\" and not in_s and i + 1 < n:
+            i += 2
+            continue
+        if ch == "'" and not in_d:
+            in_s = not in_s
+        elif ch == '"' and not in_s:
+            in_d = not in_d
+        elif not in_s and not in_d:
+            m = HEREDOC_RE.match(line, i)
+            if m:
+                found.append((m.group(2), executable))
+                i = m.end()
+                continue
+        i += 1
+    return found, in_s, in_d
+
+
+def strip_heredocs(cmd: str) -> str:
+    """Убирает ТЕЛА вложенных документов, оставляя открывающие их команды.
+
+    Без этого тело документа режется по переводу строки наравне с кодом, и
+    каждая его строка становится «командой». Обычная запись файла
+
+        cat > f <<'EOF'
+        git commit -m x
+        EOF
+
+    превращалась в отдельный сегмент `git commit -m x` и ловилась гейтом —
+    ложное срабатывание на совершенно рутинном приёме.
+
+    Три тонкости, каждая из которых меняла вердикт на противоположный:
+
+    * `<<` ВНУТРИ кавычек документа не открывает. Иначе самый обычный
+      `gh pr create --body "$(cat <<'EOF' … EOF)"` терял всё описание, и гейт
+      требовал ссылку на задачу, которая в описании есть;
+    * тело, которое исполняет оболочка (`bash <<'EOF' … EOF`), — это скрипт,
+      а не данные, и проверять его надо наравне с остальным;
+    * незакрытый документ ничего не выбрасывает: одна опечатка в ограничителе
+      иначе делает невидимым весь остаток команды.
+    """
+    if "<<" not in cmd:
+        return cmd
+    lines = cmd.split("\n")
+    kept: list[str] = []
+    idx = 0
+    in_s = in_d = False
+    while idx < len(lines):
+        line = lines[idx]
+        kept.append(line)
+        openers, in_s, in_d = _heredoc_openers(line, in_s, in_d)
+        idx += 1
+        for delim, executable in openers:
+            end = next((j for j in range(idx, len(lines)) if lines[j].strip() == delim), None)
+            if end is None:
+                continue
+            if executable:
+                kept.extend(lines[idx:end])
+            idx = end + 1
+    return "\n".join(kept)
+
+
 def split_segments(cmd: str) -> list[str]:
-    """Режет строку по операторам ; && || | & вне кавычек.
+    """Режет строку по операторам ; && || | & И ПО ПЕРЕВОДУ СТРОКИ, вне кавычек.
 
     Нужно, потому что `echo ok && git commit …` — это два вызова, и
     проверять надо каждый. Наивный поиск подстроки здесь ошибается в обе
     стороны.
+
+    Перевод строки в списке разделителей — не мелочь. Агенты сплошь и рядом
+    посылают многострочные команды, и без него весь скрипт выглядит как один
+    сегмент, чьё первое слово — что-нибудь безобидное вроде `echo`. Тогда
+    любая проверка, разбирающая первое слово, слепа ко всему остальному:
+
+        git status\\ngit commit -m x     -> проверка видела только `git status`
+
+    Это была не экзотическая лазейка, а поведение по умолчанию.
+    """
+    return _raw_segments(strip_heredocs(LINE_CONTINUATION_RE.sub(" ", cmd)))
+
+
+def _raw_segments(cmd: str) -> list[str]:
+    """Разрез по операторам без предварительной обработки строки.
+
+    Экранирование обратной косой чертой учитывается: без него один
+    `echo don\\'t; git rebase main` оставляет разбор с «открытой» кавычкой до
+    конца строки, и весь остаток команды становится невидимым для всех
+    проверок сразу.
     """
     out: list[str] = []
     cur: list[str] = []
@@ -493,14 +699,19 @@ def split_segments(cmd: str) -> list[str]:
     i, n = 0, len(cmd)
     while i < n:
         ch = cmd[i]
+        if ch == "\\" and not in_s and i + 1 < n:
+            cur.append(ch)
+            cur.append(cmd[i + 1])
+            i += 2
+            continue
         if ch == "'" and not in_d:
             in_s = not in_s
         elif ch == '"' and not in_s:
             in_d = not in_d
-        if not in_s and not in_d and ch in ";|&":
+        if not in_s and not in_d and ch in SEGMENT_SEPARATORS:
             out.append("".join(cur))
             cur = []
-            while i < n and cmd[i] in ";|&":
+            while i < n and cmd[i] in SEGMENT_SEPARATORS:
                 i += 1
             continue
         cur.append(ch)
@@ -514,6 +725,173 @@ def tokenize(segment: str) -> list[str]:
         return shlex.split(segment)
     except ValueError:
         return segment.split()
+
+
+# Слова-обёртки: стоят перед настоящей командой и не меняют её сути.
+# Без их снятия `env git commit` и `command git rebase` выглядят как вызовы
+# `env` и `command` — то есть как что-то, чего проверка не знает, и потому
+# пропускает. Это снимало защиту целиком, включая ту, что специально ловит
+# подмену рабочего дерева (`env GIT_DIR=… git commit`).
+WRAPPER_COMMANDS = {
+    "env", "command", "builtin", "exec", "nice", "ionice", "nohup",
+    "time", "stdbuf", "sudo", "doas", "xargs", "timeout", "gtimeout",
+}
+
+# Флаги обёрток, забирающие СЛЕДУЮЩЕЕ слово как своё значение. Без этой
+# таблицы снятие обёртки съедает не флаг, а саму команду: у `sudo -u user git
+# commit` первым «настоящим» словом окажется `user`, разбор вернёт «это не
+# git» — и гейт пропустит коммит. Дыра ровно того же семейства, ради которого
+# обёртки вообще начали сниматься, просто в форме с флагом.
+WRAPPER_VALUE_FLAGS = {
+    "sudo": {"-u", "-g", "-p", "-C", "-h", "-r", "-t", "-U", "--user", "--group", "--prompt"},
+    "doas": {"-u", "-C"},
+    "env": {"-u", "-C", "-S", "--unset", "--chdir", "--split-string"},
+    "timeout": {"-s", "-k", "--signal", "--kill-after"},
+    "gtimeout": {"-s", "-k", "--signal", "--kill-after"},
+    "nice": {"-n", "--adjustment"},
+    "ionice": {"-n", "-c", "-p", "-P", "-u"},
+    "stdbuf": {"-i", "-o", "-e", "--input", "--output", "--error"},
+    "xargs": {"-I", "-L", "-n", "-P", "-s", "-d", "-E", "-a", "--replace",
+              "--max-lines", "--max-args", "--max-procs", "--delimiter"},
+    "nohup": set(),
+    "command": set(),
+    "builtin": set(),
+    "exec": {"-a"},
+    "time": {"-f", "-o", "--format", "--output"},
+}
+
+# Оболочки, принимающие команду строкой: `bash -c "git commit …"`.
+SHELL_COMMANDS = {"bash", "sh", "zsh", "dash", "ksh"}
+
+# Флаг «команда строкой» у оболочки, включая слитные формы `-lc`, `-ec`.
+SHELL_C_RE = re.compile(r"^-[a-zA-Z]*c$")
+
+# Подстановка команд: $(…) и `…`.
+SUBSHELL_RE = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
+
+MAX_EXPAND_DEPTH = 3
+
+# Длительность-аргумент обёртки: `30`, `0.5`, `10s`, `5m`, `2h`.
+DURATION_RE = re.compile(r"^\d+(?:\.\d+)?[smhd]?$")
+
+
+def peel_wrappers(tokens: list[str]) -> tuple[list[str], dict[str, str]]:
+    """Снимает слова-обёртки и их флаги, оставляя настоящую команду.
+
+    `env -i FOO=1 git commit` -> `git commit`
+    `sudo -u user nice -n 5 git rebase` -> `git rebase`
+
+    Возвращает ещё и присваивания переменных, встреченные на любом уровне:
+    `env GIT_DIR=/tmp git commit` прячет присваивание ПОСЛЕ обёртки, и
+    потерять его нельзя — именно оно переадресует git в другое дерево.
+
+    Флаг, забирающий следующее слово, снимается ВМЕСТЕ со значением — иначе
+    значение и станет «командой» (`sudo -u user git commit` → `user`), разбор
+    ответит «это не git», и гейт пропустит коммит. Список таких флагов задан
+    явно, по обёрткам (WRAPPER_VALUE_FLAGS).
+
+    Незнакомый флаг значение НЕ забирает — намеренно: у `xargs -0 git commit`
+    предположение обратного съело бы саму команду. Плата за выбор — обёртка с
+    незнакомым флагом-значением останется не разобранной; при добавлении
+    обёртки в WRAPPER_COMMANDS заполняйте и её таблицу флагов.
+    """
+    out = list(tokens)
+    collected: dict[str, str] = {}
+    for _ in range(MAX_EXPAND_DEPTH):
+        out, env = strip_env_prefix(out)
+        collected.update(env)
+        if not out:
+            return out, collected
+        name = os.path.basename(out[0])
+        if name not in WRAPPER_COMMANDS:
+            return out, collected
+        value_flags = WRAPPER_VALUE_FLAGS.get(name, set())
+        rest = out[1:]
+        i = 0
+        while i < len(rest):
+            tok = rest[i]
+            if tok.startswith("--") and "=" in tok:
+                i += 1
+                continue
+            if tok.startswith("-") and tok != "-":
+                # `-u user`, `-s KILL`, а также слитные формы вроде `-n5`.
+                if tok in value_flags and i + 1 < len(rest):
+                    i += 2
+                else:
+                    i += 1
+                continue
+            # Длительность у `timeout`: `30`, `0.5`, `10s`, `5m`. Только
+            # `isdigit()` — и `timeout 5m git push --force` остаётся неразобранным,
+            # то есть просто проходит мимо запрета.
+            if DURATION_RE.match(tok):
+                i += 1
+                continue
+            break
+        out = rest[i:]
+    return out, collected
+
+
+def expand_segments(cmd: str, depth: int = 0) -> list[str]:
+    """Все команды внутри строки, включая спрятанные в оболочке и подстановке.
+
+    Разворачивает:
+      * операторы и переводы строк                 (split_segments)
+      * `bash -c "…"` / `sh -c "…"` / `eval "…"`   (команда как строка)
+      * `$(…)` и обратные кавычки                  (подстановка команд)
+
+    Смысл: проверка должна видеть команду, которая РЕАЛЬНО выполнится, а не
+    ту, что стоит первым словом. Иначе любой из этих способов записи — не
+    экзотика, а обычный приём — снимает защиту.
+    """
+    segments = split_segments(cmd)
+    if depth >= MAX_EXPAND_DEPTH:
+        return segments
+
+    out: list[str] = []
+    for seg in segments:
+        out.append(seg)
+        tokens = tokenize(seg)
+        peeled, _env = peel_wrappers(tokens)
+        if not peeled:
+            continue
+        exe = os.path.basename(peeled[0])
+
+        if exe in SHELL_COMMANDS:
+            # `-c`, но и слитные формы вроде `-lc`, `-ec`: команда-строкой
+            # пишется и так, и так, а разбор только точного `-c` означает,
+            # что вторая форма проходит мимо всех проверок.
+            for idx, tok in enumerate(peeled[1:], start=1):
+                if SHELL_C_RE.match(tok) and idx + 1 < len(peeled):
+                    out.extend(expand_segments(peeled[idx + 1], depth + 1))
+                    break
+        elif exe == "eval":
+            out.extend(expand_segments(" ".join(peeled[1:]), depth + 1))
+
+        for m in SUBSHELL_RE.finditer(seg):
+            inner = m.group(1) or m.group(2) or ""
+            if inner.strip():
+                out.extend(expand_segments(inner, depth + 1))
+    return out
+
+
+def invocations(command: str, patterns: list[str]) -> list[str]:
+    """Сегменты, в которых команда РЕАЛЬНО вызывается, а не просто упомянута.
+
+    Совпадение ищется от начала сегмента (после снятия присваиваний и слов-
+    обёрток), а не где угодно в строке. Иначе проверка ошибается в обе
+    стороны сразу: `gh  pr merge` с двумя пробелами проходит мимо, а
+    безобидное `echo "gh pr merge"` — блокируется. Первое опаснее, второе
+    быстрее приводит к тому, что защиту выключают.
+    """
+    hits: list[str] = []
+    for seg in expand_segments(command):
+        peeled, _env = peel_wrappers(tokenize(seg))
+        if not peeled:
+            continue
+        head = " ".join([os.path.basename(peeled[0]), *peeled[1:]])
+        if any(re.match(p, head) for p in patterns):
+            hits.append(seg)
+    return hits
 
 
 def strip_env_prefix(tokens: list[str]) -> tuple[list[str], dict[str, str]]:
@@ -536,8 +914,13 @@ def parse_git(tokens: list[str]) -> dict | None:
 
     Имя бинарника берётся как basename — иначе `/usr/bin/git rebase`
     проходит мимо запрета, который ищет ровно строку "git".
+    Слова-обёртки снимаются (`env git …`, `sudo git …`), а присваивания
+    переменных собираются из ОБЕИХ позиций: перед обёрткой и после неё
+    (`env GIT_DIR=/tmp git commit` — присваивание стоит после `env`).
     """
     head, env = strip_env_prefix(tokens)
+    head, env2 = peel_wrappers(head)
+    env = {**env, **env2}
     if not head or os.path.basename(head[0]) != "git":
         return None
     i, globals_seen = 1, []
