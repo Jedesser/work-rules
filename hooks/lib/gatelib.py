@@ -804,8 +804,15 @@ SHELL_COMMANDS = {"bash", "sh", "zsh", "dash", "ksh"}
 # Флаг «команда строкой» у оболочки, включая слитные формы `-lc`, `-ec`.
 SHELL_C_RE = re.compile(r"^-[a-zA-Z]*c$")
 
-# Подстановка команд: $(…) и `…`.
-SUBSHELL_RE = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
+# Ссылка, которую перехватчик развернуть не может: переменная или подстановка.
+# Такая запись означает «куда попадёт — неизвестно», и все гейты обязаны
+# трактовать её одинаково строго, иначе один слой мягче другого.
+UNRESOLVED_REF_RE = re.compile(r"[$`]")
+
+# Подстановка команд: $(…), `…`, а также подстановка процесса <(…) и >(…).
+# Последняя выглядит как аргумент, но тело её ВЫПОЛНЯЕТСЯ — `cat <(git commit …)`
+# коммитит по-настоящему, поэтому смотреть внутрь обязательно.
+SUBSHELL_RE = re.compile(r"\$\(([^()]*)\)|`([^`]*)`|[<>]\(([^()]*)\)")
 
 MAX_EXPAND_DEPTH = 3
 
@@ -956,7 +963,7 @@ def expand_segments(cmd: str, depth: int = 0) -> list[str]:
             out.extend(expand_segments(" ".join(peeled[1:]), depth + 1))
 
         for m in SUBSHELL_RE.finditer(seg):
-            inner = m.group(1) or m.group(2) or ""
+            inner = m.group(1) or m.group(2) or m.group(3) or ""
             if inner.strip():
                 out.extend(expand_segments(inner, depth + 1))
     return out
@@ -1003,7 +1010,7 @@ def _walk_with_dirs(command: str, base_dir: str, depth: int) -> list[tuple[str, 
         elif exe == "eval":
             out.extend(_walk_with_dirs(" ".join(peeled[1:]), current, depth + 1))
         for m in SUBSHELL_RE.finditer(top):
-            inner = m.group(1) or m.group(2) or ""
+            inner = m.group(1) or m.group(2) or m.group(3) or ""
             if inner.strip():
                 out.extend(_walk_with_dirs(inner, current, depth + 1))
     return out

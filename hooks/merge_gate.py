@@ -66,7 +66,7 @@ MERGE_VALUE_FLAGS = {"-b", "--body", "-t", "--subject", "--body-file", "-F",
 # Номер PR внутри сырого вызова API: `gh api -X PUT repos/o/r/pulls/7/merge`.
 API_PR_RE = re.compile(r"\bpulls/(\d+)/merge\b")
 # Нераскрытая подстановка — цель, которую нельзя проверить в принципе.
-UNRESOLVED_RE = re.compile(r"[$`]")
+UNRESOLVED_RE = G.UNRESOLVED_REF_RE
 
 # Отличает «у ветки нет PR» (сверять нечего) от «спросить не получилось»
 # (сверка не выполнена — отказ). Оба случая иначе выглядели бы как None.

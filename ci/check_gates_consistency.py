@@ -222,11 +222,34 @@ def main() -> int:
             ("замер времени", "time git commit -m x"),
             ("скобки поверх обёртки", "(env git commit -m x)"),
             ("скобки поверх перехода", "(cd . && git commit -m x)"),
+            # Подстановка процесса выглядит аргументом, но тело её
+            # ВЫПОЛНЯЕТСЯ: `cat <(git commit …)` коммитит по-настоящему.
+            ("подстановка процесса на вход", "cat <(git commit -m x)"),
+            ("подстановка процесса на выход", "echo hi > >(git commit -m x)"),
         ]
         for label, cmd in evasions:
             code, _o, _e = run_hook("commit_gate.py", {
                 "tool_name": "Bash", "cwd": str(repo), "tool_input": {"command": cmd}}, repo)
             check(f"гейт не обходится: {label}", code == 2, f"вернул {code} для {cmd!r}")
+
+        # Тот же разбор — общий для всех перехватчиков, поэтому запрет
+        # разрушительных команд обязан видеть внутрь подстановки процесса.
+        for label, cmd in (("отправка силой", "cat <(git push --force origin main)"),
+                           ("удаление рекурсивно", "cat <(rm -rf /tmp/zzz)")):
+            code, _o, _e = run_hook("guard_bash.py", {
+                "tool_name": "Bash", "cwd": str(repo),
+                "tool_input": {"command": cmd}}, repo)
+            check(f"подстановка процесса не прячет запрет: {label}", code == 2,
+                  f"вернул {code}")
+        # Ветка отправки, заданная переменной: развернуть её нельзя, и запрет
+        # обязан отказать — иначе `git push origin $BR` проходит мимо него.
+        for cmd in ("git push origin $BR", "git push origin ${BR}",
+                    "git push origin `echo main`"):
+            code, _o, err = run_hook("guard_bash.py", {
+                "tool_name": "Bash", "cwd": str(repo),
+                "tool_input": {"command": cmd}}, repo)
+            check(f"нераскрытая ветка отправки отклоняется: {cmd!r}",
+                  code == 2 and "переменной" in err, f"вернул {code}: {err[:120]}")
 
         # Безобидный коммит впереди не должен снимать гейт со всей строки:
         # проверка обязана дойти до КАЖДОГО коммита в команде.
