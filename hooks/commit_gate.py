@@ -192,7 +192,7 @@ def commits_all(args: list[str]) -> bool:
         tok = args[i]
         if tok == "--":
             break
-        if tok == "--all":
+        if G.is_opt(tok, "--all"):
             return True
         if tok.startswith("-") and tok != "-" and not tok.startswith("--") and "a" in tok[1:]:
             return True
@@ -219,7 +219,7 @@ def has_pathspec(args: list[str]) -> bool:
         tok = args[i]
         if tok == "--":
             return i + 1 < len(args)
-        if tok == "--pathspec-from-file" or tok.startswith("--pathspec-from-file="):
+        if G.is_opt(tok, "--pathspec-from-file", min_len=5):
             return True
         if not tok.startswith("-") or tok == "-":
             return True

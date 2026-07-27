@@ -193,7 +193,7 @@ def _adds_everything(tok: str) -> bool:
     точек и косых.
     """
     a = tok.strip("'\"")
-    if a in ("--all", "--no-ignore-removal"):
+    if G.is_opt(a, "--all") or G.is_opt(a, "--no-ignore-removal"):
         return True
     for prefix in PATHSPEC_ROOT_PREFIXES:
         if a.startswith(prefix):
@@ -223,7 +223,7 @@ def check_git(parsed: dict, main_branch: str, work_dir) -> str | None:
             "Переписанная история ломает уже выданные ссылки на коммиты и чужие копии.\n"
             "Вместо этого: `git merge` основной ветки внутрь своей."
         )
-    if sub == "commit" and ("--amend" in args):
+    if sub == "commit" and any(G.is_opt(a, "--amend") for a in args):
         return (
             "🛑 `git commit --amend` запрещён.\n"
             "Он подменяет уже сделанный коммит: доказательства (расписки, ссылки, "
@@ -236,13 +236,14 @@ def check_git(parsed: dict, main_branch: str, work_dir) -> str | None:
         # `--force-with-lease=<ссылка>` и `--force-if-includes` — те же записи
         # принудительной отправки; точное сравнение их не ловит, а форма с `=`
         # как раз рекомендуется в большинстве руководств.
-        if any(a.startswith("--force") or _has_letter(a, "f") for a in args):
+        if any(G.is_opt(a, "--force") or a.startswith("--force-")
+               or _has_letter(a, "f") for a in args):
             return (
                 "🛑 Принудительная отправка запрещена.\n"
                 "Она молча уничтожает чужие коммиты в общей ветке."
             )
         # `--all` / `--mirror` отправляют все ветки разом, включая основную.
-        if any(a in ("--all", "--mirror") for a in args):
+        if any(G.is_opt(a, "--all") or G.is_opt(a, "--mirror") for a in args):
             return (
                 f"🛑 `git push {[a for a in args if a in ('--all', '--mirror')][0]}` запрещён — "
                 f"он отправляет все ветки разом, в том числе `{main_branch}`.\n"
@@ -283,12 +284,12 @@ def check_git(parsed: dict, main_branch: str, work_dir) -> str | None:
             "которые вы не видели.\n"
             "Добавляйте файлы поимённо — это заодно заставляет посмотреть на них."
         )
-    if sub == "reset" and "--hard" in args:
+    if sub == "reset" and any(G.is_opt(a, "--hard") for a in args):
         return (
             "🛑 `git reset --hard` запрещён — необратимо уничтожает несохранённую работу.\n"
             "Если нужно отступить: `git stash`, либо новый коммит с откатом."
         )
-    if sub == "clean" and any(a == "--force" or _has_letter(a, "f") for a in args):
+    if sub == "clean" and any(G.is_opt(a, "--force") or _has_letter(a, "f") for a in args):
         return (
             "🛑 `git clean -f` запрещён — удаляет файлы, о которых git не знает "
             "(в том числе локальные наработки другого агента или человека)."

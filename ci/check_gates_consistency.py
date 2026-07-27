@@ -900,6 +900,20 @@ def main() -> int:
             "tool_input": {"command": "git -C . commit -m x critical/a.txt"}}, elsewhere)
         check("относительный -C: гейт коммита смотрит в дерево сессии", code == 2,
               f"вернул {code}")
+        # git понимает однозначное сокращение длинного флага: `--al` — это
+        # `--all`, `--amen` — `--amend`. Дословное сравнение пропускает ровно
+        # ту команду, которую запрещает.
+        for cmd in ("git commit --amen -m x", "git reset --har",
+                    "git clean --for", "git add --al", "git push --forc origin feature"):
+            code, _o, _e = run_hook("guard_bash.py", {
+                "tool_name": "Bash", "cwd": str(repo),
+                "tool_input": {"command": cmd}}, repo)
+            check(f"сокращённый флаг тоже запрещён: {cmd}", code == 2, f"вернул {code}")
+        for cmd in ("git commit --al -m x", "git commit --pathspec-from-fi=paths -m x"):
+            code, _o, _e = run_hook("commit_gate.py", {
+                "tool_name": "Bash", "cwd": str(allflag),
+                "tool_input": {"command": cmd}}, allflag)
+            check(f"сокращённый флаг виден гейту коммита: {cmd}", code == 2, f"вернул {code}")
         for cmd in blocked:
             code, _o, _e = run_hook("guard_bash.py", {
                 "tool_name": "Bash", "cwd": str(repo), "tool_input": {"command": cmd}}, repo)
