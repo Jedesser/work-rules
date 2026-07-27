@@ -147,7 +147,7 @@ def bash_targets(command: str, base: str) -> list[tuple[str, str]]:
             args = parsed.get("args", [])
             if sub not in WRITING_GIT or any(a in READONLY_GIT_ARGS for a in args):
                 continue
-            git_dir = G.git_dash_c_dir(parsed) or seg_dir
+            git_dir = G.git_dash_c_dir(parsed, seg_dir) or seg_dir
             targets = [a for a in args if not a.startswith("-")]
             if not targets:
                 # `git checkout` без путей меняет всё дерево целиком.

@@ -618,7 +618,7 @@
 |---|---|---|
 | 0. Замысел | [`hooks/plan_gate.py`](hooks/plan_gate.py) | открыто |
 | 1. Задача | [`hooks/issue_link_gate.py`](hooks/issue_link_gate.py) | открыто |
-| 2. Изоляция | [`hooks/worktree_guard.py`](hooks/worktree_guard.py), [`hooks/worktree_freshness.py`](hooks/worktree_freshness.py) | закрыто / открыто |
+| 2. Изоляция | [`hooks/worktree_guard.py`](hooks/worktree_guard.py), [`hooks/worktree_freshness.py`](hooks/worktree_freshness.py) | открыто / открыто |
 | 4. Ограничители | [`hooks/guard_bash.py`](hooks/guard_bash.py), [`hooks/guard_resources.py`](hooks/guard_resources.py) | закрыто / открыто |
 | 5. Ревью | [`hooks/subagent_receipt.py`](hooks/subagent_receipt.py), [`hooks/commit_gate.py`](hooks/commit_gate.py), [`hooks/merge_gate.py`](hooks/merge_gate.py) | закрыто |
 | 5. Экономия ревью | [`hooks/preflight_review_guard.py`](hooks/preflight_review_guard.py), [`hooks/review_churn_warn.py`](hooks/review_churn_warn.py) | открыто |

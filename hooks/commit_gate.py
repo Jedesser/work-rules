@@ -75,7 +75,7 @@ def main() -> int:
                     f"Используйте `git -C <путь> commit`."
                 )
 
-        work_dir = parsed_dir(parsed, G.resolve_work_dir(seg_dir) or session_dir)
+        work_dir = parsed_dir(parsed, G.resolve_work_dir(seg_dir) or session_dir, seg_dir)
 
         # `git commit -a` / `-am` коммитит всё изменённое, ничего не добавляя
         # в индекс заранее. Смотреть только на индекс здесь означает увидеть
@@ -226,11 +226,11 @@ def collect_adds(segments: list[tuple[str, str]], session_dir: str) -> dict[str,
         # но сам синоним обязан учитываться, иначе им и обходят.
         if not parsed or parsed.get("subcommand") not in ("add", "stage"):
             continue
-        work_dir = parsed_dir(parsed, G.resolve_work_dir(shell_cwd) or session_dir)
+        work_dir = parsed_dir(parsed, G.resolve_work_dir(shell_cwd) or session_dir, shell_cwd)
         args = parsed.get("args", [])
         if any(a in ADD_TRACKED_ONLY for a in args):
             continue
-        base = G.git_dash_c_dir(parsed) or shell_cwd or work_dir
+        base = G.git_dash_c_dir(parsed, shell_cwd) or shell_cwd or work_dir
         paths = [to_repo_path(a, base, work_dir) for a in args if not a.startswith("-")]
         out.setdefault(work_dir, []).extend(paths or [ADD_SCOPE_UNKNOWN])
     return out
@@ -268,8 +268,8 @@ def unseen_adds(paths: list[str], work_dir: str) -> list[str]:
     return unseen
 
 
-def parsed_dir(parsed: dict, fallback: str) -> str:
-    d = G.git_dash_c_dir(parsed)
+def parsed_dir(parsed: dict, fallback: str, base_dir: str = "") -> str:
+    d = G.git_dash_c_dir(parsed, base_dir)
     if d and os.path.isdir(d):
         return G.resolve_work_dir(d)
     return fallback

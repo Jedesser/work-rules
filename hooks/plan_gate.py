@@ -55,7 +55,7 @@ def main() -> int:
             if env.get("PLAN_OK") == "1":
                 return 0
             if commit_dir is None:
-                commit_dir = G.git_dash_c_dir(parsed) or seg_dir
+                commit_dir = G.git_dash_c_dir(parsed, seg_dir) or seg_dir
     if commit_dir is None or os.environ.get("PLAN_OK") == "1":
         return 0
 

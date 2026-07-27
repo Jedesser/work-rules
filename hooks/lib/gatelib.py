@@ -161,8 +161,15 @@ def load_config() -> dict:
                 cfg[k].update(v)
             else:
                 cfg[k] = v
-    except Exception:
+    except FileNotFoundError:
         pass
+    except Exception as exc:
+        # Молча откатываться к значениям по умолчанию нельзя: в них пуст
+        # список красной зоны и не задана общая копия, то есть одна лишняя
+        # запятая тихо выключает два слоя защиты, а снаружи всё выглядит
+        # работающим. Работу не останавливаем, но говорим вслух.
+        sys.stderr.write(f"⚠️ Конфигурация проверок не прочитана ({exc}); "
+                         "действуют значения по умолчанию — красная зона пуста.\n")
     _CONFIG_CACHE = cfg
     return cfg
 
@@ -1089,13 +1096,29 @@ KNOWN_GIT_SUBCOMMANDS = {
 }
 
 
-def git_dash_c_dir(parsed: dict) -> str | None:
-    """Каталог из `git -C <path>` — гейт должен смотреть именно туда."""
+def git_dash_c_dir(parsed: dict, base_dir: str = "") -> str | None:
+    """Каталог из `git -C <path>` — гейт должен смотреть именно туда.
+
+    Относительный путь считается от каталога СЕГМЕНТА (куда успел перейти
+    `cd`), а не от каталога процесса хука. Процесс хука запускается из
+    корня проекта, а сессия часто сидит в отдельной рабочей копии, поэтому
+    `git -C . commit` при наивном разборе указывал бы на чужое дерево —
+    как правило чистое, то есть гейт молча пропускал бы коммит.
+
+    Несколько `-C` подряд git применяет накопительно, каждый следующий —
+    относительно предыдущего; повторяем это же правило.
+    """
     g = parsed.get("globals", [])
+    current = base_dir or ""
+    found = False
     for idx, tok in enumerate(g):
         if tok == "-C" and idx + 1 < len(g):
-            return g[idx + 1]
-    return None
+            path = g[idx + 1]
+            current = path if os.path.isabs(path) else os.path.join(current, path)
+            found = True
+    if not found:
+        return None
+    return os.path.normpath(current) if current else None
 
 
 # ---------------------------------------------------------------------------

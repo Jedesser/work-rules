@@ -37,9 +37,19 @@
     "(^|/)(session|token|password)[a-z]*/"
   ],
 
+  "_reviewers_comment": [
+    "Имя ревьюера здесь — это имя файла в agents/ без расширения. В комплекте",
+    "их три: change-reviewer, critical-zone-reviewer, ci-watcher. Пока брифа с",
+    "таким именем нет, требование к нему выполнить нечем: гейт будет отказывать",
+    "и обойти его будет нечем. Поэтому строки by_path ниже закомментированы —",
+    "раскомментируйте ту, под которую написали своего ревьюера.",
+    "Расписка засчитывается, когда подагент вызван с этим именем в subagent_type",
+    "либо его бриф начинается строкой: You are the `<имя>` subagent"
+  ],
   "reviewers": {
     "always": ["change-reviewer"],
-    "by_path": [
+    "by_path": [],
+    "_by_path_examples": [
       { "pattern": "\\.(go|rs|java|kt)$", "reviewer": "language-reviewer" },
       { "pattern": "(^|/)migrations?/", "reviewer": "migration-reviewer" },
       { "pattern": "^(frontend|web|ui)/", "reviewer": "pattern-reviewer" }

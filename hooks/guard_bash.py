@@ -84,7 +84,7 @@ def main() -> int:
             # `git -C <путь> push` спрашивает про ветку ТОГО дерева: текущая
             # ветка сессии к нему отношения не имеет, и проверка «отправка без
             # явной ветки» по ней дала бы вердикт про чужой репозиторий.
-            target = G.git_dash_c_dir(parsed)
+            target = G.git_dash_c_dir(parsed, seg_dir)
             verdict = check_git(
                 parsed, main_branch,
                 lambda t=target, d=seg_dir: G.resolve_work_dir(

@@ -639,6 +639,23 @@ def main() -> int:
                 "tool_name": "Bash", "cwd": str(onmain),
                 "tool_input": {"command": cmd}}, onmain)
             check(f"из основной ветки {cmd!r} -> {expect}", code == expect, f"вернул {code}")
+        # Относительный `-C` считается от каталога СЕГМЕНТА, а не от каталога
+        # процесса хука: процесс запускается из корня проекта, а сессия сидит в
+        # отдельной рабочей копии. Пока это не так, `git -C . push` из основной
+        # ветки смотрит на чужое (обычно чистое) дерево и проходит насквозь.
+        elsewhere = make_repo(tmp, "elsewhere")
+        write_config(elsewhere)
+        for cmd, expect in (("git -C . push", 2), ("cd .. && git -C onmain push", 2),
+                            (f"git -C {onmain} push", 2)):
+            code, _o, _e = run_hook("guard_bash.py", {
+                "tool_name": "Bash", "cwd": str(onmain),
+                "tool_input": {"command": cmd}}, elsewhere)
+            check(f"относительный -C: {cmd!r} -> {expect}", code == expect, f"вернул {code}")
+        code, _o, _e = run_hook("commit_gate.py", {
+            "tool_name": "Bash", "cwd": str(allflag),
+            "tool_input": {"command": "git -C . commit -m x critical/a.txt"}}, elsewhere)
+        check("относительный -C: гейт коммита смотрит в дерево сессии", code == 2,
+              f"вернул {code}")
         for cmd in blocked:
             code, _o, _e = run_hook("guard_bash.py", {
                 "tool_name": "Bash", "cwd": str(repo), "tool_input": {"command": cmd}}, repo)
