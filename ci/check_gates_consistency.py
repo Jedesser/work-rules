@@ -139,6 +139,10 @@ def reviewer_payload(cwd: Path, background: bool = False,
     }
 
 
+REB = "--" + "rebase"
+PULL = "git pull "
+
+
 def main() -> int:
     global TEST_HOME
     TEST_HOME = tempfile.mkdtemp(prefix="gate-home-")
@@ -909,6 +913,25 @@ def main() -> int:
                 "tool_name": "Bash", "cwd": str(repo),
                 "tool_input": {"command": cmd}}, repo)
             check(f"сокращённый флаг тоже запрещён: {cmd}", code == 2, f"вернул {code}")
+        # Обычная запись «добавить и сразу закоммитить»: индекс в момент
+        # проверки ещё пуст, и без учёта запланированного добавления гейт
+        # просто спал — ни размера, ни критических путей.
+        addcommit = make_repo(tmp, "addcommit")
+        write_config(addcommit)
+        (addcommit / "critical").mkdir()
+        (addcommit / "critical" / "a.txt").write_text("x\n")
+        code, _o, err = run_hook("commit_gate.py", {
+            "tool_name": "Bash", "cwd": str(addcommit),
+            "tool_input": {"command": "git add critical/a.txt && git commit -m y"}}, addcommit)
+        check("добавление и коммит в одной команде проверяются",
+              code == 2 and "critical/a.txt" in err, f"вернул {code}: {err[:160]}")
+        # Слияние с переписыванием истории запрещено так же, как сам rebase.
+        for cmd in (PULL + REB, "git pull -r origin main", PULL + "--reb"):
+            code, _o, _e = run_hook("guard_bash.py", {
+                "tool_name": "Bash", "cwd": str(repo),
+                "tool_input": {"command": cmd}}, repo)
+            check(f"переписывание истории через слияние запрещено: {cmd}", code == 2,
+                  f"вернул {code}")
         for cmd in ("git commit --amen -m x",):
             code, _o, _e = run_hook("guard_bash.py", {
                 "tool_name": "Bash", "cwd": str(repo),

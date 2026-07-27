@@ -225,6 +225,14 @@ def check_git(parsed: dict, main_branch: str, work_dir) -> str | None:
             "Напишите команду явно."
         )
 
+    if sub == "pull" and any(G.is_opt(a, "--rebase") or _has_letter(a, "r")
+                             for a in args):
+        return (
+            "🛑 `git pull --rebase` запрещён по той же причине, что и `git rebase`:\n"
+            "он переписывает уже сделанные коммиты ветки.\n"
+            "Вместо этого: `git fetch` и обычный `git merge`."
+        )
+
     if sub == "rebase":
         return (
             "🛑 `git rebase` запрещён.\n"

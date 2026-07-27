@@ -105,10 +105,19 @@ def main() -> int:
                 f"({work_dir}).\n\nПроверить, что именно коммитится, нечем. "
                 "Проверьте состояние репозитория и повторите."
             )
-        if commits_all(args) or has_pathspec(args):
-            files = sorted(set(G.uncommitted_files(work_dir)) | set(staged))
+        # То, что кладут в индекс ЭТОЙ ЖЕ командой, — часть будущего коммита,
+        # хотя в момент проверки индекс ещё пуст. Без этого обычная запись
+        # `git add <файлы> && git commit -m x` усыпляла гейт целиком: он видел
+        # пустой набор и уходил дальше, не проверив ни размер, ни пути.
+        adds = pending_adds.get(work_dir, [])
+        if ADD_SCOPE_UNKNOWN in adds:
+            planned = set(G.uncommitted_files(work_dir))
         else:
-            files = staged
+            planned = set(adds)
+        if commits_all(args) or has_pathspec(args):
+            files = sorted(set(G.uncommitted_files(work_dir)) | set(staged) | planned)
+        else:
+            files = sorted(set(staged) | planned)
         # Пустой набор или мелкое некритичное изменение — этот сегмент вопросов
         # не вызывает. Но выйти отсюда насовсем нельзя: в команде может быть
         # ещё один коммит, и первый безобидный снимал бы гейт со всей строки.
