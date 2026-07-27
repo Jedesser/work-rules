@@ -304,6 +304,18 @@ def changed_files(work_dir: str, base_ref: str | None = None) -> list[str]:
     return [ln for ln in out.splitlines() if ln.strip()]
 
 
+def untracked_files(work_dir: str) -> list[str]:
+    """Файлы, о которых git ещё не знает.
+
+    `git diff` их не показывает, поэтому набор «что попадёт в коммит» без
+    них неполон ровно в самом интересном случае — новый файл.
+    """
+    code, out = git(["ls-files", "-o", "--exclude-standard"], work_dir)
+    if code != 0:
+        return []
+    return [ln for ln in out.splitlines() if ln.strip()]
+
+
 def staged_files(work_dir: str) -> list[str]:
     """Файлы в индексе. None — посмотреть не удалось.
 

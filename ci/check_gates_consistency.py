@@ -925,6 +925,26 @@ def main() -> int:
             "tool_input": {"command": "git add critical/a.txt && git commit -m y"}}, addcommit)
         check("добавление и коммит в одной команде проверяются",
               code == 2 and "critical/a.txt" in err, f"вернул {code}: {err[:160]}")
+        # «Только отслеживаемое» тоже определяет состав коммита: файл новым
+        # не станет, но размер и критические пути посчитать обязаны.
+        (addcommit / "critical" / "a.txt").write_text("x\n")
+        git(["add", "critical/a.txt"], addcommit)
+        git(["commit", "-qm", "внесли критический файл"], addcommit)
+        (addcommit / "critical" / "a.txt").write_text("v2\n")
+        code, _o, err = run_hook("commit_gate.py", {
+            "tool_name": "Bash", "cwd": str(addcommit),
+            "tool_input": {"command": "git add -u && git commit -m y"}}, addcommit)
+        check("`git add -u` и коммит в одной команде проверяются",
+              code == 2 and "critical/a.txt" in err, f"вернул {code}: {err[:160]}")
+        # Добавление ПОСЛЕ коммита в него не попадает — засчитывать его значит
+        # отказывать по файлу, которого в этом коммите не будет.
+        (addcommit / "critical" / "b.txt").write_text("z\n")
+        code, _o, err = run_hook("commit_gate.py", {
+            "tool_name": "Bash", "cwd": str(addcommit),
+            "tool_input": {"command": "git commit -m y && git add critical/b.txt"}},
+            addcommit)
+        check("добавление после коммита в него не засчитывается",
+              "critical/b.txt" not in err, err[:160])
         # Слияние с переписыванием истории запрещено так же, как сам rebase.
         for cmd in (PULL + REB, "git pull -r origin main", PULL + "--reb"):
             code, _o, _e = run_hook("guard_bash.py", {

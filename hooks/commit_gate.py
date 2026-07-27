@@ -52,9 +52,10 @@ def main() -> int:
     # файлы, о которых git ещё не знает. Значит `git add новый_файл &&
     # REVIEW_DONE=1 git commit` пронёс бы непроверенный файл под распиской,
     # выписанной на дифф без него.
-    pending_adds = collect_adds(segments, session_dir)
-
-    for segment, seg_dir in segments:
+    for idx, (segment, seg_dir) in enumerate(segments):
+        # Добавления считаются только ДО этого коммита: `git commit -m y &&
+        # git add x` кладёт x в следующий коммит, а не в этот.
+        pending_adds = collect_adds(segments[:idx], session_dir)
         tokens = G.tokenize(segment)
         parsed = G.parse_git(tokens, seg_dir)
         if not parsed:
@@ -110,10 +111,11 @@ def main() -> int:
         # `git add <файлы> && git commit -m x` усыпляла гейт целиком: он видел
         # пустой набор и уходил дальше, не проверив ни размер, ни пути.
         adds = pending_adds.get(work_dir, [])
-        if ADD_SCOPE_UNKNOWN in adds:
-            planned = set(G.uncommitted_files(work_dir))
-        else:
-            planned = set(adds)
+        # Сверяется с тем, что реально отличается от последнего коммита:
+        # `git add` неизменённого файла ничего в коммит не приносит, а в счёте
+        # раздувал бы размер и давал отказ на пустом месте.
+        touched = set(G.uncommitted_files(work_dir)) | set(G.untracked_files(work_dir))
+        planned = touched if ADD_SCOPE_UNKNOWN in adds else set(adds) & touched
         if commits_all(args) or has_pathspec(args):
             files = sorted(set(G.uncommitted_files(work_dir)) | set(staged) | planned)
         else:
@@ -135,7 +137,9 @@ def main() -> int:
         if not bypass:
             return G.block(_why_blocked(work_dir, files, big, critical, reviewers, cfg))
 
-        unseen = unseen_adds(pending_adds.get(work_dir, []), work_dir)
+        unseen = unseen_adds(
+            [p for p in pending_adds.get(work_dir, []) if p != ADD_SCOPE_UNKNOWN],
+            work_dir)
         if unseen:
             return G.block(
                 "🛑 Гейт коммита: в одной команде и `git add`, и обход `REVIEW_DONE=1`.\n\n"
@@ -266,12 +270,39 @@ def collect_adds(segments: list[tuple[str, str]], session_dir: str) -> dict[str,
             continue
         work_dir = parsed_dir(parsed, G.resolve_work_dir(shell_cwd) or session_dir, shell_cwd)
         args = parsed.get("args", [])
-        if any(a in ADD_TRACKED_ONLY for a in args):
+        # «Только отслеживаемое» (-u, -p, -i) не может внести файл, которого
+        # ревьюер не видел, — но состав коммита определяет так же, как любой
+        # другой add. Раньше такой сегмент выпадал целиком, и `git add -u &&
+        # git commit` не проверялся ни по размеру, ни по критическим путям.
+        if is_tracked_only(args) or has_pathspec_file(args):
+            out.setdefault(work_dir, []).append(ADD_SCOPE_UNKNOWN)
             continue
         base = G.git_dash_c_dir(parsed, shell_cwd) or shell_cwd or work_dir
         paths = [to_repo_path(a, base, work_dir) for a in args if not a.startswith("-")]
         out.setdefault(work_dir, []).extend(paths or [ADD_SCOPE_UNKNOWN])
     return out
+
+
+def is_tracked_only(args: list[str]) -> bool:
+    """Формы `git add`, берущие только уже отслеживаемое.
+
+    Узнаются так же, как везде: с сокращениями длинных флагов и внутри
+    связок коротких — иначе `git add -uv` запрещён, а `git add -u` нет.
+    """
+    for tok in args:
+        if tok == "--":
+            break
+        if any(G.is_opt(tok, n) for n in ("--update", "--patch", "--interactive")):
+            return True
+        if (tok.startswith("-") and tok != "-" and not tok.startswith("--")
+                and any(ch in tok[1:] for ch in "upi")):
+            return True
+    return False
+
+
+def has_pathspec_file(args: list[str]) -> bool:
+    """Пути лежат в файле — состав добавления заранее не известен."""
+    return any(G.is_opt(tok, "--pathspec-from-file", min_len=5) for tok in args)
 
 
 def to_repo_path(path: str, base: str, work_dir: str) -> str:
