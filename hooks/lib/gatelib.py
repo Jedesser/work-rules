@@ -1081,18 +1081,59 @@ MAX_ALIAS_DEPTH = 10
 UNPARSEABLE_ALIAS_RE = re.compile(r"[$`;|&\n\r<>()#]")
 
 
-def _skip_git_globals(tokens: list[str]) -> tuple[str | None, list[str]]:
-    """Первое слово-подкоманда после глобальных флагов git и остаток за ней."""
+def mask_quoted(text: str) -> str:
+    """Содержимое кавычек заменено на «x» — длина и сами кавычки сохранены.
+
+    Нужно там, где ищут значащие знаки оболочки: `(`, `>` и `#` внутри
+    строки формата (`--pretty=format:"%h (%an)"`) — обычный текст, и
+    отказывать по ним значит ломать безобидные команды.
+    """
+    out: list[str] = []
+    quote = ""
+    escaped = False
+    for ch in text:
+        if escaped:
+            out.append("x")
+            escaped = False
+            continue
+        if ch == "\\" and quote != "'":
+            out.append(ch)
+            escaped = True
+            continue
+        if quote:
+            out.append(ch if ch == quote else "x")
+            if ch == quote:
+                quote = ""
+            continue
+        if ch in "\"'":
+            quote = ch
+        out.append(ch)
+    return "".join(out)
+
+
+def _skip_git_globals(tokens: list[str]) -> tuple[str | None, list[str], list[str]]:
+    """Подкоманда после глобальных флагов git, сами флаги и остаток за ней.
+
+    Флаги возвращаются, а не выбрасываются: `-C`, `--git-dir` и `-c
+    alias.x=…` из тела псевдонима определяют, В КАКОМ дереве выполнится
+    команда и что за ней стоит. Потерять их значит проверить не то дерево.
+    """
     i = 0
+    skipped: list[str] = []
     while i < len(tokens):
         tok = tokens[i]
         if not tok.startswith("-"):
-            return tok, tokens[i + 1:]
+            return tok, skipped, tokens[i + 1:]
+        skipped.append(tok)
         if tok.startswith("--") and "=" in tok:
             i += 1
             continue
-        i += 2 if tok in GIT_FLAGS_WITH_VALUE else 1
-    return None, []
+        if tok in GIT_FLAGS_WITH_VALUE and i + 1 < len(tokens):
+            skipped.append(tokens[i + 1])
+            i += 2
+            continue
+        i += 1
+    return None, skipped, []
 
 
 def resolve_alias(sub: str, globals_seen: list[str], cwd: str) -> tuple[str, list[str]]:
@@ -1135,13 +1176,17 @@ def resolve_alias(sub: str, globals_seen: list[str], cwd: str) -> tuple[str, lis
             body = expansion[1:].strip()
             parts = tokenize(body)
             if (parts and os.path.basename(parts[0]) == "git"
-                    and not UNPARSEABLE_ALIAS_RE.search(body)):
+                    and not UNPARSEABLE_ALIAS_RE.search(mask_quoted(body))):
                 # Подкоманду ищем так же, как в обычном вызове: перед ней могут
                 # стоять глобальные флаги, и `!git -C /tmp push --force`
                 # позиционным `parts[1]` читался бы как подкоманда `-C`.
-                nxt, rest = _skip_git_globals(parts[1:])
+                nxt, skipped, rest = _skip_git_globals(parts[1:])
                 if nxt is None:
                     return SHELL_ALIAS, []
+                # Флаги тела попадают в тот же список, по которому гейты ищут
+                # `-C` и `-c alias.x=…`: иначе псевдоним прячет и дерево, и
+                # объявленный внутри себя псевдоним.
+                globals_seen[:0] = skipped
                 sub, extra = nxt, rest + extra
                 continue
             return SHELL_ALIAS, []

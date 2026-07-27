@@ -324,6 +324,36 @@ def main() -> int:
         # её на позицию вправо — позиционный разбор читал бы `-C` как команду.
         git(["config", "alias.nl", "!git status\ngit push --force"], alias_repo)
         git(["config", "alias.dc", "!git -C /tmp push --force"], alias_repo)
+        # Каталог из тела псевдонима должен доходить до гейта: здесь ЕДИНСТВЕННЫЙ
+        # признак — дерево, в котором выполнится коммит. Если флаг потерян, гейт
+        # смотрит на вызывающее дерево и пропускает.
+        target_repo = make_repo(tmp, "aliastarget")
+        write_config(target_repo)
+        (target_repo / "critical").mkdir()
+        (target_repo / "critical" / "alias-only.txt").write_text("x\n")
+        git(["add", "critical/alias-only.txt"], target_repo)
+        git(["config", "alias.dcommit", f"!git -C {target_repo} commit -m x"], alias_repo)
+        code, _o, err = run_hook("commit_gate.py", {
+            "tool_name": "Bash", "cwd": str(alias_repo),
+            "tool_input": {"command": "git dcommit"}}, alias_repo)
+        # Сверяется НАЗВАННОЕ дерево, а не только код отказа: отказать гейт может
+        # и по вызывающему дереву, и тогда проверка зелена по неверной причине.
+        check("каталог из тела псевдонима доходит до гейта",
+              code == 2 and "critical/alias-only.txt" in err, f"вернул {code}: {err[:200]}")
+        # Псевдоним, объявленный внутри тела, тоже обязан раскрыться.
+        git(["config", "alias.inner", "!git -c alias.pp3=push pp3 --force"], alias_repo)
+        code, _o, err = run_hook("guard_bash.py", {
+            "tool_name": "Bash", "cwd": str(alias_repo),
+            "tool_input": {"command": "git inner origin main"}}, alias_repo)
+        check("псевдоним внутри тела псевдонима раскрывается", code == 2, f"вернул {code}")
+        # …и при этом знаки оболочки ВНУТРИ кавычек — обычный текст.
+        git(["config", "alias.fmt", '!git log --pretty=format:"%h (%an)"'], alias_repo)
+        for hook in ("guard_bash.py", "commit_gate.py"):
+            code, _o, err = run_hook(hook, {
+                "tool_name": "Bash", "cwd": str(alias_repo),
+                "tool_input": {"command": "git fmt -3"}}, alias_repo)
+            check(f"скобки в строке формата не ломают работу ({hook})", code == 0,
+                  f"вернул {code}: {err[:120]}")
         for name in ("nl", "dc"):
             code, _o, err = run_hook("guard_bash.py", {
                 "tool_name": "Bash", "cwd": str(alias_repo),
