@@ -720,7 +720,97 @@ def split_segments(cmd: str) -> list[str]:
 
     Это была не экзотическая лазейка, а поведение по умолчанию.
     """
-    return _raw_segments(strip_heredocs(LINE_CONTINUATION_RE.sub(" ", cmd)))
+    prepared = strip_heredocs(LINE_CONTINUATION_RE.sub(" ", cmd))
+    # Тело подстановки прячется за заглушку ДО разреза. Иначе разделитель
+    # внутри него режет саму подстановку пополам: от `cat <(git commit; true)`
+    # остаётся `cat <(git commit`, скобки уже не парные, тело никем не
+    # разбирается — и запись, отличающаяся шестью символами от закрытой,
+    # снова проносит и коммит без ревью, и принудительную отправку.
+    masked, subs = extract_substitutions(prepared)
+    return [restore_substitutions(s, subs) for s in _raw_segments(masked)]
+
+
+SUBST_PLACEHOLDER = "__subst{}__"
+SUBST_PLACEHOLDER_RE = re.compile(r"__subst(\d+)__")
+
+
+def extract_substitutions(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """Заменяет подстановки заглушками; возвращает текст и список (исходник, тело).
+
+    Считает вложенность скобок, поэтому видит и `$(git commit -m "$(date)")`,
+    где регулярное выражение с `[^()]*` не находит вообще ничего.
+    Незакрытая подстановка считается идущей до конца строки — не разобрать её
+    значит пропустить, а пропускать здесь нельзя.
+    """
+    out: list[str] = []
+    subs: list[tuple[str, str]] = []
+    i, n = 0, len(text)
+    in_s = in_d = False
+    while i < n:
+        ch = text[i]
+        if ch == "\\" and not in_s and i + 1 < n:
+            out.append(text[i:i + 2])
+            i += 2
+            continue
+        if ch == "'" and not in_d:
+            in_s = not in_s
+            out.append(ch)
+            i += 1
+            continue
+        if ch == '"' and not in_s:
+            in_d = not in_d
+            out.append(ch)
+            i += 1
+            continue
+        if in_s:
+            out.append(ch)
+            i += 1
+            continue
+        start = i
+        if ch == "`":
+            j = i + 1
+            body_start = j
+            while j < n and text[j] != "`":
+                j += 2 if text[j] == "\\" else 1
+            body = text[body_start:j]
+            i = j + 1 if j < n else n
+        elif (text.startswith("$(", i)
+              # `<(…)` и `>(…)` внутри двойных кавычек подстановкой не являются.
+              or (not in_d and ch in "<>" and i + 1 < n and text[i + 1] == "(")):
+            j = i + 2
+            body_start = j
+            depth = 1
+            while j < n and depth:
+                c = text[j]
+                if c == "\\":
+                    j += 2
+                    continue
+                if c == "(":
+                    depth += 1
+                elif c == ")":
+                    depth -= 1
+                j += 1
+            body = text[body_start:j - 1] if not depth else text[body_start:]
+            i = j
+        else:
+            out.append(ch)
+            i += 1
+            continue
+        subs.append((text[start:i], body))
+        out.append(" " + SUBST_PLACEHOLDER.format(len(subs) - 1) + " ")
+    return "".join(out), subs
+
+
+def restore_substitutions(text: str, subs: list[tuple[str, str]]) -> str:
+    def repl(m: re.Match) -> str:
+        idx = int(m.group(1))
+        return subs[idx][0] if idx < len(subs) else m.group(0)
+    return SUBST_PLACEHOLDER_RE.sub(repl, text).strip()
+
+
+def substitution_bodies(text: str) -> list[str]:
+    """Тела всех подстановок верхнего уровня — то, что реально выполнится."""
+    return [body for _raw, body in extract_substitutions(text)[1]]
 
 
 def _raw_segments(cmd: str) -> list[str]:
@@ -808,11 +898,6 @@ SHELL_C_RE = re.compile(r"^-[a-zA-Z]*c$")
 # Такая запись означает «куда попадёт — неизвестно», и все гейты обязаны
 # трактовать её одинаково строго, иначе один слой мягче другого.
 UNRESOLVED_REF_RE = re.compile(r"[$`]")
-
-# Подстановка команд: $(…), `…`, а также подстановка процесса <(…) и >(…).
-# Последняя выглядит как аргумент, но тело её ВЫПОЛНЯЕТСЯ — `cat <(git commit …)`
-# коммитит по-настоящему, поэтому смотреть внутрь обязательно.
-SUBSHELL_RE = re.compile(r"\$\(([^()]*)\)|`([^`]*)`|[<>]\(([^()]*)\)")
 
 MAX_EXPAND_DEPTH = 3
 
@@ -962,8 +1047,7 @@ def expand_segments(cmd: str, depth: int = 0) -> list[str]:
         elif exe == "eval":
             out.extend(expand_segments(" ".join(peeled[1:]), depth + 1))
 
-        for m in SUBSHELL_RE.finditer(seg):
-            inner = m.group(1) or m.group(2) or m.group(3) or ""
+        for inner in substitution_bodies(seg):
             if inner.strip():
                 out.extend(expand_segments(inner, depth + 1))
     return out
@@ -1009,8 +1093,7 @@ def _walk_with_dirs(command: str, base_dir: str, depth: int) -> list[tuple[str, 
                     break
         elif exe == "eval":
             out.extend(_walk_with_dirs(" ".join(peeled[1:]), current, depth + 1))
-        for m in SUBSHELL_RE.finditer(top):
-            inner = m.group(1) or m.group(2) or m.group(3) or ""
+        for inner in substitution_bodies(top):
             if inner.strip():
                 out.extend(_walk_with_dirs(inner, current, depth + 1))
     return out

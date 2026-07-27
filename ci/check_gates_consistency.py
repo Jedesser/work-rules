@@ -226,6 +226,14 @@ def main() -> int:
             # ВЫПОЛНЯЕТСЯ: `cat <(git commit …)` коммитит по-настоящему.
             ("подстановка процесса на вход", "cat <(git commit -m x)"),
             ("подстановка процесса на выход", "echo hi > >(git commit -m x)"),
+            # Разделитель ВНУТРИ подстановки не должен резать её пополам, а
+            # вложенные скобки — прятать целиком: и то и другое возвращало
+            # обход, отличающийся от закрытого несколькими символами.
+            ("разделитель внутри подстановки", "cat <(git commit -m x; true)"),
+            ("разделитель внутри присваивания", "x=$(git commit -m x; true)"),
+            ("вложенная подстановка", 'cat <(git commit -m "$(date)")'),
+            ("вложенная подстановка в присваивании", 'x=$(git commit -m "$(date)")'),
+            ("подстановка внутри подстановки процесса", "cat <(git commit -F <(echo hi))"),
         ]
         for label, cmd in evasions:
             code, _o, _e = run_hook("commit_gate.py", {
@@ -235,7 +243,12 @@ def main() -> int:
         # Тот же разбор — общий для всех перехватчиков, поэтому запрет
         # разрушительных команд обязан видеть внутрь подстановки процесса.
         for label, cmd in (("отправка силой", "cat <(git push --force origin main)"),
-                           ("удаление рекурсивно", "cat <(rm -rf /tmp/zzz)")):
+                           ("удаление рекурсивно", "cat <(rm -rf /tmp/zzz)"),
+                           ("отправка силой с разделителем",
+                            "cat <(git push --force origin main; true)"),
+                           ("удаление с разделителем", "cat <(rm -rf /tmp/zzz; true)"),
+                           ("удаление во вложенных скобках",
+                            'cat <(rm -rf "$(echo /tmp/zzz)")')):
             code, _o, _e = run_hook("guard_bash.py", {
                 "tool_name": "Bash", "cwd": str(repo),
                 "tool_input": {"command": cmd}}, repo)
@@ -244,7 +257,10 @@ def main() -> int:
         # Ветка отправки, заданная переменной: развернуть её нельзя, и запрет
         # обязан отказать — иначе `git push origin $BR` проходит мимо него.
         for cmd in ("git push origin $BR", "git push origin ${BR}",
-                    "git push origin `echo main`"):
+                    "git push origin `echo main`",
+                    # Нераскрытым может быть и слот удалёнки: если `$ARGS`
+                    # развернётся в `origin main`, запрет исчезает целиком.
+                    "git push $ARGS", 'git push "${ARGS[@]}"'):
             code, _o, err = run_hook("guard_bash.py", {
                 "tool_name": "Bash", "cwd": str(repo),
                 "tool_input": {"command": cmd}}, repo)

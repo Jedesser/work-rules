@@ -123,8 +123,8 @@ def main() -> int:
 PUSH_VALUE_FLAGS = {"-o", "--push-option", "--repo", "--receive-pack", "--exec"}
 
 
-def _push_refspecs(args: list[str]) -> list[str]:
-    """Что именно отправляют: всё позиционное после имени удалённого репозитория.
+def _push_positionals(args: list[str]) -> list[str]:
+    """Позиционные слова команды отправки: удалёнка и ссылки.
 
     Значения флагов приходится пропускать явно: у `git push -o ci.skip` наивный
     отбор «токены без дефиса» принимает `ci.skip` за ветку, решает, что ветка
@@ -142,7 +142,12 @@ def _push_refspecs(args: list[str]) -> list[str]:
             continue
         positional.append(tok)
         i += 1
-    return positional[1:]
+    return positional
+
+
+def _push_refspecs(args: list[str]) -> list[str]:
+    """Что именно отправляют: всё позиционное после имени удалёнки."""
+    return _push_positionals(args)[1:]
 
 
 def _refspec_targets(refspecs: list[str], current: str) -> tuple[list[str], bool]:
@@ -265,6 +270,15 @@ def check_git(parsed: dict, main_branch: str, work_dir) -> str | None:
                 f"он отправляет все ветки разом, в том числе `{main_branch}`.\n"
                 "Всё попадает в основную ветку только через PR и его проверки."
             )
+        # Нераскрытым может оказаться и слот удалёнки: если `$ARGS`
+        # развернётся в `origin main`, запрет исчезает целиком — поэтому
+        # проверяются ВСЕ позиционные слова, а не только ссылки.
+        if any(G.UNRESOLVED_REF_RE.search(a) for a in _push_positionals(args)):
+            return (
+                "🛑 Ветка отправки задана переменной — куда уйдёт "
+                "отправка, проверке не видно.\n"
+                "Напишите имя ветки явно."
+            )
         refspecs = _push_refspecs(args)
         if refspecs:
             # Текущая ветка нужна только чтобы раскрыть `HEAD`; в остальных
@@ -277,15 +291,6 @@ def check_git(parsed: dict, main_branch: str, work_dir) -> str | None:
                     "🛑 Принудительная отправка запрещена.\n"
                     "`+` перед ссылкой — это тот же `--force`, только без флага: "
                     "он так же молча уничтожает чужие коммиты."
-                )
-            # Ссылка через переменную или подстановку: куда она развернётся,
-            # перехватчику не видно. Гейт мержа на такой записи отказывает —
-            # запрет на отправку в основную ветку не может быть мягче.
-            if any(G.UNRESOLVED_REF_RE.search(t) for t in targets):
-                return (
-                    "🛑 Ветка отправки задана переменной — куда уйдёт "
-                    "отправка, проверке не видно.\n"
-                    "Напишите имя ветки явно."
                 )
             if main_branch in targets:
                 return (
