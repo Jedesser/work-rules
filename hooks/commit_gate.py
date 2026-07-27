@@ -96,10 +96,19 @@ def main() -> int:
         # `git commit <путь>` — та же дыра другой записью: коммитится
         # содержимое дерева по этому пути, индекс при этом пуст.
         args = parsed.get("args", [])
+        staged = G.staged_files(work_dir)
+        if staged is None:
+            # Посмотреть индекс не удалось. Считать, что он пуст, значит
+            # превратить сбой git в разрешение на коммит.
+            return G.block(
+                "🛑 Гейт коммита: не удалось прочитать индекс "
+                f"({work_dir}).\n\nПроверить, что именно коммитится, нечем. "
+                "Проверьте состояние репозитория и повторите."
+            )
         if commits_all(args) or has_pathspec(args):
-            files = sorted(set(G.uncommitted_files(work_dir)) | set(G.staged_files(work_dir)))
+            files = sorted(set(G.uncommitted_files(work_dir)) | set(staged))
         else:
-            files = G.staged_files(work_dir)
+            files = staged
         # Пустой набор или мелкое некритичное изменение — этот сегмент вопросов
         # не вызывает. Но выйти отсюда насовсем нельзя: в команде может быть
         # ещё один коммит, и первый безобидный снимал бы гейт со всей строки.

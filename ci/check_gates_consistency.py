@@ -679,6 +679,35 @@ def main() -> int:
               code == 2 and "вершину ветки PR" in err, f"вернул {code}: {err[:160]}")
         write_config(repo)
 
+        # Точка ветвления входит в отпечаток: основная ветка могла уйти вперёд,
+        # дифф самой ветки при этом не меняется, а сольётся уже другой
+        # результат — расписка на старую точку его не описывает.
+        moved = make_repo(tmp, "movedbase")
+        write_config(moved)
+        (moved / "critical").mkdir()
+        (moved / "critical" / "a.txt").write_text("x\n")
+        git(["add", "critical/a.txt"], moved)
+        run_hook("subagent_receipt.py", reviewer_payload(moved), moved)
+        code, _o, err = run_hook("commit_gate.py", {
+            "tool_name": "Bash", "cwd": str(moved),
+            "tool_input": {"command": "REVIEW_DONE=1 git commit -m x"}}, moved)
+        check("расписка действует на своей точке ветвления", code == 0, err[:160])
+        git(["stash", "-q"], moved)
+        git(["checkout", "-q", "main"], moved)
+        (moved / "other.txt").write_text("y\n")
+        git(["add", "other.txt"], moved)
+        git(["commit", "-qm", "main ушла вперёд"], moved)
+        git(["update-ref", "refs/remotes/origin/main", "HEAD"], moved)
+        git(["checkout", "-q", "feature"], moved)
+        # Основную ветку вливают в свою — точка ветвления уезжает, а дифф самой
+        # ветки остаётся прежним: без точки в отпечатке расписка бы уцелела.
+        git(["merge", "-q", "--no-edit", "main"], moved)
+        git(["stash", "pop", "-q"], moved)
+        code, _o, err = run_hook("commit_gate.py", {
+            "tool_name": "Bash", "cwd": str(moved),
+            "tool_input": {"command": "REVIEW_DONE=1 git commit -m x"}}, moved)
+        check("уехавшая точка ветвления обесценивает расписку", code == 2, f"вернул {code}")
+
         print("\n8. Предполётная проверка ревьюера")
         clean = tmp / "clean"
         clean.mkdir()

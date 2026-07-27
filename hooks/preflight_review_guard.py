@@ -45,8 +45,7 @@ def main() -> int:
         return 0
 
     work_dir = G.resolve_work_dir(data.get("cwd"))
-    diff_sha = G.compute_diff_sha(work_dir)
-    if diff_sha != G.EMPTY_DIFF_SHA:
+    if G.changed_files(work_dir):
         return 0
 
     return G.block(

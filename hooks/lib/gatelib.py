@@ -37,7 +37,9 @@ from urllib.parse import quote
 # sha256 от пустой строки. Отпечаток дерева, в котором нет изменений
 # относительно точки ветвления. Знать его нужно, чтобы отличать «нечего
 # ревьюить» от «ревью прошло».
-EMPTY_DIFF_SHA = hashlib.sha256(b"").hexdigest()
+# Отпечаток пустого диффа зависит от точки ветвления (она входит в него),
+# поэтому «пусто» определяется отдельной функцией, а не сравнением с
+# константой: константа молча перестала бы совпадать.
 
 DEFAULT_CONFIG: dict = {
     # Ветка, относительно которой считается «что я изменил».
@@ -283,7 +285,11 @@ def compute_diff_sha(work_dir: str, base_ref: str | None = None) -> str | None:
     code, out = git(["diff", base], work_dir, load_config()["git_diff_timeout"])
     if code != 0:
         return None
-    return hashlib.sha256(out.encode("utf-8", "replace")).hexdigest()
+    # В отпечаток входит и сама точка ветвления: основная ветка могла уйти
+    # вперёд, дифф ветки при этом не изменится, а сольётся уже другой
+    # результат — расписка на старую точку его не описывает.
+    payload = base + "\n" + out
+    return hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()
 
 
 def changed_files(work_dir: str, base_ref: str | None = None) -> list[str]:
@@ -299,9 +305,15 @@ def changed_files(work_dir: str, base_ref: str | None = None) -> list[str]:
 
 
 def staged_files(work_dir: str) -> list[str]:
+    """Файлы в индексе. None — посмотреть не удалось.
+
+    Пустой список и «не смогли посмотреть» — разные вещи: первое значит
+    «коммитить нечего», и гейт на этом пропускает команду. Возвращать его
+    при сбое git значит превращать сбой в разрешение.
+    """
     code, out = git(["diff", "--cached", "--name-only"], work_dir)
     if code != 0:
-        return []
+        return None
     return [ln for ln in out.splitlines() if ln.strip()]
 
 
@@ -551,7 +563,7 @@ def check_receipts(files: list[str], work_dir: str, cfg: dict | None = None) -> 
             "не удалось посчитать отпечаток изменений (git недоступен, нет базовой "
             "ветки или таймаут). Гейт в такой ситуации падает ЗАКРЫТО."
         ]
-    if diff_sha == EMPTY_DIFF_SHA:
+    if not changed_files(work_dir):
         return False, [
             "дерево пустое относительно точки ветвления — ревьюить нечего. "
             "Скорее всего сессия сидит не в той рабочей копии, либо новые файлы "

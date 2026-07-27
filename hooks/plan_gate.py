@@ -66,7 +66,7 @@ def main() -> int:
 
     # Файлы ветки + то, что сейчас в индексе: план мог быть закоммичен
     # раньше, а мог добавляться прямо этим коммитом.
-    files = set(G.changed_files(work_dir)) | set(G.staged_files(work_dir))
+    files = set(G.changed_files(work_dir)) | set(G.staged_files(work_dir) or [])
     if len(files) <= plan_cfg.get("min_files", 2):
         return 0
 
