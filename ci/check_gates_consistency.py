@@ -685,8 +685,10 @@ def main() -> int:
         code, _o, err = run_hook("merge_gate.py", {
             "tool_name": "Bash", "cwd": str(repo),
             "tool_input": {"command": "MERGE_REVIEW_DONE=1 glab mr merge 77"}}, repo)
-        check("явная цель у чужого CLI не проходит без резолвера", code == 2,
-              f"вернул {code}: {err[:140]}")
+        # Сверяется причина, а не только код: отказать гейт может и по диффу,
+        # и тогда проверка зелена, ничего не проверив.
+        check("явная цель у чужого CLI не проходит без резолвера",
+              code == 2 and "резолвера" in err, f"вернул {code}: {err[:140]}")
         code, _o, err = run_hook("merge_gate.py", {
             "tool_name": "Bash", "cwd": str(repo),
             "tool_input": {"command": "glab mr merge"}}, repo)
