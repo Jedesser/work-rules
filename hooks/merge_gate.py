@@ -120,7 +120,11 @@ def check_target(segment: str, work_dir: str) -> int:
         return 0
     target = merge_target(tokens)
     if target is None:
-        return 0        # цель не названа — сольётся PR текущей ветки
+        # Цель не названа — сольётся PR текущей ветки. Ветка та самая, а вот
+        # вершина у неё может быть чужой, и это ровно та форма, которую
+        # советуют все отказы ниже: пропускать её без сверки значит оставить
+        # дыру в самом рекомендуемом пути.
+        return check_tip(work_dir, _pr_head("", work_dir))
     if UNRESOLVED_RE.search(target):
         return G.block(
             f"🛑 Гейт мержа: цель «{target}» подставляется оболочкой и до проверки "
@@ -150,8 +154,17 @@ def check_target(segment: str, work_dir: str) -> int:
             "Перейдите в рабочую копию того PR и слейте его оттуда."
         )
 
-    # Ветка та же — но вершина у неё может быть чужая: другая копия успела
-    # запушить, и расписка описывает дифф, которого в PR уже нет.
+    return check_tip(work_dir, resolved)
+
+
+def check_tip(work_dir: str, resolved: tuple[str, str] | None) -> int:
+    """Совпадает ли вершина ветки в PR с проверенной здесь копией.
+
+    Ветка может быть та самая, а вершина — чужая: другая копия успела
+    запушить, и расписки описывают дифф, которого в PR уже нет.
+    """
+    if not resolved:
+        return 0
     _code, local = G.git(["rev-parse", "HEAD"], work_dir)
     if local.strip() and resolved[1] and local.strip() != resolved[1]:
         # Расхождение симметрично: в PR может лежать чужой коммит, а может
@@ -176,10 +189,15 @@ def check_target(segment: str, work_dir: str) -> int:
 
 
 def _pr_head(target: str, work_dir: str) -> tuple[str, str] | None:
-    """Ветка-источник указанного PR и её вершина. None — выяснить не удалось."""
+    """Ветка-источник указанного PR и её вершина. None — выяснить не удалось.
+
+    Пустая цель — «PR текущей ветки»: `gh pr view` без аргумента понимает
+    её сам, поэтому аргумент просто не передаётся.
+    """
     try:
         proc = subprocess.run(
-            ["gh", "pr", "view", target, "--json", "headRefName,headRefOid",
+            ["gh", "pr", "view", *([target] if target else []),
+             "--json", "headRefName,headRefOid",
              "-q", ".headRefName + \" \" + .headRefOid"],
             cwd=work_dir, capture_output=True, text=True, timeout=20,
         )

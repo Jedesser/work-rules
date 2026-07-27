@@ -189,12 +189,19 @@ def has_pathspec(args: list[str]) -> bool:
 
     `git commit -m x файл.py` коммитит содержимое дерева по этому пути мимо
     индекса — для гейта это ровно тот же случай, что и `-a`.
+
+    `--pathspec-from-file=<файл>` делает то же самое, только пути лежат в
+    файле: позиционных аргументов нет вовсе, и наивная проверка «начинается
+    ли с дефиса» видит команду без путей. С пустым индексом это значило бы
+    «коммитить нечего» — и гейт пропускал бы коммит рабочего дерева.
     """
     i = 0
     while i < len(args):
         tok = args[i]
         if tok == "--":
             return i + 1 < len(args)
+        if tok == "--pathspec-from-file" or tok.startswith("--pathspec-from-file="):
+            return True
         if not tok.startswith("-") or tok == "-":
             return True
         i = _advance(args, i)

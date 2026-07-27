@@ -334,6 +334,15 @@ def main() -> int:
             "tool_name": "Bash", "cwd": str(allflag),
             "tool_input": {"command": "git commit -m x critical/a.txt"}}, allflag)
         check("коммит с указанием пути проверяется", code == 2)
+        # Пути могут лежать в файле — позиционных аргументов тогда нет вовсе,
+        # и проверка «начинается ли с дефиса» видит команду без путей. Коммит
+        # при этом берёт рабочее дерево ровно так же, как `-a`.
+        for cmd in ("git commit --pathspec-from-file=paths -m x",
+                    "git commit --pathspec-from-file paths -m x"):
+            code, _o, _e = run_hook("commit_gate.py", {
+                "tool_name": "Bash", "cwd": str(allflag),
+                "tool_input": {"command": cmd}}, allflag)
+            check(f"пути из файла: {cmd.split()[2]} проверяется", code == 2, f"вернул {code}")
 
         # Имя одного ревьюера — префикс имени другого. Расписка более
         # узкоспециального НЕ должна закрывать требование к общему.
@@ -479,6 +488,37 @@ def main() -> int:
             "tool_input": {"command": "gh pr merge --body 123 --merge"}}, repo)
         check("значение флага не принимается за номер PR",
               "какая ветка стоит" not in err, err[:160])
+        # Форма без цели — та самая, которую советуют все отказы выше. Ветка
+        # тут заведомо своя, а вот вершина у неё может быть чужой: другая
+        # копия успела запушить. Не сверять её значит оставить дыру ровно в
+        # рекомендуемом пути. Подставляем свой `gh`, чтобы не ходить в сеть.
+        tip = make_repo(tmp, "tipcheck")
+        write_config(tip)
+        (tip / "a.txt").write_text("y\n")
+        git(["add", "a.txt"], tip)
+        run_hook("subagent_receipt.py", reviewer_payload(tip), tip)
+        fakebin = tmp / "fakebin"
+        fakebin.mkdir()
+        gh = fakebin / "gh"
+        gh.write_text("#!/bin/sh\necho 'feature 0123456789abcdef0123456789abcdef01234567'\n")
+        gh.chmod(0o755)
+        fake_path = {"PATH": f"{fakebin}:{os.environ.get('PATH', '')}"}
+        code, _o, err = run_hook("merge_gate.py", {
+            "tool_name": "Bash", "cwd": str(tip),
+            "tool_input": {"command": "MERGE_REVIEW_DONE=1 gh pr merge --merge"}},
+            tip, fake_path)
+        check("мерж без цели сверяет вершину ветки PR",
+              code == 2 and "вершина ветки PR" in err, f"вернул {code}: {err[:160]}")
+        # А когда вершины совпали — отказа быть не должно, иначе проверка
+        # блокирует вообще всё и отличить её срабатывание не от чего.
+        local = git(["rev-parse", "HEAD"], tip)
+        gh.write_text(f"#!/bin/sh\necho 'feature {local}'\n")
+        gh.chmod(0o755)
+        code, _o, err = run_hook("merge_gate.py", {
+            "tool_name": "Bash", "cwd": str(tip),
+            "tool_input": {"command": "MERGE_REVIEW_DONE=1 gh pr merge --merge"}},
+            tip, fake_path)
+        check("совпавшая вершина мержу не мешает", code == 0, err[:200])
         write_config(repo)
 
         print("\n8. Предполётная проверка ревьюера")
