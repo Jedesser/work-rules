@@ -679,6 +679,21 @@ def main() -> int:
               code == 2 and "вершину ветки PR" in err, f"вернул {code}: {err[:160]}")
         write_config(repo)
 
+        # Другой CLI: без цели гейт работает как обычно (ветка — своя), а явно
+        # названная цель непроверяема, и молчать про неё нельзя.
+        write_config(repo, {"pr_merge_patterns": [r"\bglab mr merge\b"]})
+        code, _o, err = run_hook("merge_gate.py", {
+            "tool_name": "Bash", "cwd": str(repo),
+            "tool_input": {"command": "MERGE_REVIEW_DONE=1 glab mr merge 77"}}, repo)
+        check("явная цель у чужого CLI не проходит без резолвера", code == 2,
+              f"вернул {code}: {err[:140]}")
+        code, _o, err = run_hook("merge_gate.py", {
+            "tool_name": "Bash", "cwd": str(repo),
+            "tool_input": {"command": "glab mr merge"}}, repo)
+        check("без цели чужой CLI проверяется как обычно",
+              "резолвера" not in err, err[:140])
+        write_config(repo)
+
         # Точка ветвления входит в отпечаток: основная ветка могла уйти вперёд,
         # дифф самой ветки при этом не меняется, а сольётся уже другой
         # результат — расписка на старую точку его не описывает.
