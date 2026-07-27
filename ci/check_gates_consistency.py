@@ -281,6 +281,20 @@ def main() -> int:
             "tool_name": "Bash", "cwd": str(alias_repo),
             "tool_input": {"command": "git st"}}, alias_repo)
         check("неизвестное слово без псевдонима не мешает работе", code == 0, err[:120])
+        # За псевдонимом может стоять команда ОБОЛОЧКИ — раскрыть её нельзя, но
+        # и пропускать нельзя: иначе одна строка конфига снимает все запреты.
+        for hook, cmd in (("guard_bash.py", "git -c alias.zz='!git push --force origin main' zz"),
+                          ("guard_bash.py", "git -c alias.zz='!git rebase main' zz"),
+                          ("commit_gate.py", "git -c alias.zz='!git commit -m x' zz")):
+            code, _o, err = run_hook(hook, {
+                "tool_name": "Bash", "cwd": str(alias_repo),
+                "tool_input": {"command": cmd}}, alias_repo)
+            check(f"псевдоним-оболочка отклоняется ({hook})", code == 2, f"вернул {code}")
+        git(["config", "alias.pp", "!git push --force"], alias_repo)
+        code, _o, err = run_hook("guard_bash.py", {
+            "tool_name": "Bash", "cwd": str(alias_repo),
+            "tool_input": {"command": "git pp origin main"}}, alias_repo)
+        check("псевдоним-оболочка из конфига тоже отклоняется", code == 2, f"вернул {code}")
 
         # Сообщение, начинающееся с дефиса, — не флаг «взять всё».
         code, _o, _e = run_hook("commit_gate.py", {
@@ -426,6 +440,21 @@ def main() -> int:
               code == 2, f"вернул {code}")
 
         print("\n7. Красная зона требует человека даже при валидных расписках")
+        # Форма без номера сверяет вершину ветки PR, а значит спрашивает
+        # хостинг. Подставляем свой резолвер, отвечающий «всё совпало», —
+        # иначе тесты этого раздела упирались бы в отсутствие сети, а не в то,
+        # что они проверяют.
+        fakebin = tmp / "fakebin"
+        fakebin.mkdir()
+        gh = fakebin / "gh"
+        fake_path = {"PATH": f"{fakebin}:{os.environ.get('PATH', '')}"}
+
+        def fake_gh(for_repo: Path) -> None:
+            gh.write_text(f"#!/bin/sh\necho '{git(['rev-parse', '--abbrev-ref', 'HEAD'], for_repo)} "
+                          f"{git(['rev-parse', 'HEAD'], for_repo)}'\n")
+            gh.chmod(0o755)
+
+        fake_gh(repo)
         (repo / "money").mkdir()
         (repo / "money" / "billing.txt").write_text("x\n")
         git(["add", "money/billing.txt"], repo)
@@ -438,7 +467,7 @@ def main() -> int:
         # проверки самого диффа. Сверка явно названного PR проверяется ниже.
         red_payload = {"tool_name": "Bash", "cwd": str(repo),
                        "tool_input": {"command": "MERGE_REVIEW_DONE=1 gh pr merge --merge"}}
-        code, _o, err = run_hook("merge_gate.py", red_payload, repo)
+        code, _o, err = run_hook("merge_gate.py", red_payload, repo, fake_path)
         check("мерж красной зоны не проходит автоматически", code == 2, err[:200])
         # Проверяется НАЗВАННЫЙ путь, а не слово «красная зона»: слово может
         # встретиться в тексте любого другого отказа, и проверка станет зелёной
@@ -446,7 +475,7 @@ def main() -> int:
         check("отказ называет файл красной зоны", "money/billing.txt" in err, err[:200])
         code, _o, err = run_hook("merge_gate.py", {
             "tool_name": "Bash", "cwd": str(repo),
-            "tool_input": {"command": "gh  pr  merge --merge"}}, repo)
+            "tool_input": {"command": "gh  pr  merge --merge"}}, repo, fake_path)
         check("лишние пробелы не проносят мерж мимо гейта", code == 2, err[:120])
         code, _o, err = run_hook("merge_gate.py", {
             "tool_name": "Bash", "cwd": str(repo),
@@ -461,6 +490,15 @@ def main() -> int:
             "tool_name": "Bash", "cwd": str(repo),
             "tool_input": {"command": "gh api -X PUT repos/o/r/pulls/1/merge"}}, repo)
         check("мерж через сырой вызов API тоже под гейтом", code == 2, f"вернул {code}")
+        # Битый конфиг откатывает проверки к встроенным умолчаниям. Если те
+        # слабее образцового конфига, одна лишняя запятая тихо снимает слой —
+        # поэтому умолчания обязаны покрывать не меньше примера.
+        sys.path.insert(0, str(HOOKS / "lib"))
+        import gatelib as GL  # noqa: E402
+        example = json.loads((ROOT / "config.example.json").read_text(encoding="utf-8"))
+        for key in ("pr_merge_patterns", "pr_create_patterns", "require_timeout_for"):
+            missing = set(example.get(key, [])) - set(GL.DEFAULT_CONFIG.get(key, []))
+            check(f"умолчания не слабее примера: {key}", not missing, f"нет: {missing}")
         # Явно названный PR: гейт считает дифф по ТЕКУЩЕЙ ветке, поэтому обязан
         # убедиться, что сливается именно она. Выяснить не удалось — отказ.
         write_config(repo)
@@ -497,12 +535,8 @@ def main() -> int:
         (tip / "a.txt").write_text("y\n")
         git(["add", "a.txt"], tip)
         run_hook("subagent_receipt.py", reviewer_payload(tip), tip)
-        fakebin = tmp / "fakebin"
-        fakebin.mkdir()
-        gh = fakebin / "gh"
         gh.write_text("#!/bin/sh\necho 'feature 0123456789abcdef0123456789abcdef01234567'\n")
         gh.chmod(0o755)
-        fake_path = {"PATH": f"{fakebin}:{os.environ.get('PATH', '')}"}
         code, _o, err = run_hook("merge_gate.py", {
             "tool_name": "Bash", "cwd": str(tip),
             "tool_input": {"command": "MERGE_REVIEW_DONE=1 gh pr merge --merge"}},
@@ -519,6 +553,24 @@ def main() -> int:
             "tool_input": {"command": "MERGE_REVIEW_DONE=1 gh pr merge --merge"}},
             tip, fake_path)
         check("совпавшая вершина мержу не мешает", code == 0, err[:200])
+        # Внешний инструмент не ответил — сверка НЕ выполнена. Пропускать
+        # значит отдавать границу основной ветки любому сбою сети.
+        gh.write_text("#!/bin/sh\necho 'gh: server error' >&2\nexit 1\n")
+        gh.chmod(0o755)
+        code, _o, err = run_hook("merge_gate.py", {
+            "tool_name": "Bash", "cwd": str(tip),
+            "tool_input": {"command": "MERGE_REVIEW_DONE=1 gh pr merge --merge"}},
+            tip, fake_path)
+        check("недоступный резолвер не пропускает мерж",
+              code == 2 and "вершину ветки PR" in err, f"вернул {code}: {err[:160]}")
+        # …а «у ветки просто нет PR» — не сбой, и мешать тут нечему.
+        gh.write_text("#!/bin/sh\necho 'no pull requests found for branch' >&2\nexit 1\n")
+        gh.chmod(0o755)
+        code, _o, err = run_hook("merge_gate.py", {
+            "tool_name": "Bash", "cwd": str(tip),
+            "tool_input": {"command": "MERGE_REVIEW_DONE=1 gh pr merge --merge"}},
+            tip, fake_path)
+        check("отсутствие PR у ветки не считается сбоем", code == 0, err[:200])
         write_config(repo)
 
         print("\n8. Предполётная проверка ревьюера")
@@ -904,6 +956,9 @@ def main() -> int:
             ("`git clean -n` в общей копии разрешён", f"git -C {shared} clean -n", mine, 0),
             ("`git rm` в общей копии", f"git -C {shared} rm a.txt", mine, 2),
             ("`git mv` в общей копии", f"git -C {shared} mv a.txt b.txt", mine, 2),
+            # Знак «больше» внутри кавычек — текст, а не перенаправление.
+            ("знак больше в сообщении коммита", 'git commit -m "было > стало"', shared, 0),
+            ("знак больше в тексте echo", 'echo "3 > 2"', shared, 0),
         ):
             code, _o, err = run_hook("worktree_guard.py", {
                 "tool_name": "Bash", "cwd": str(cwd),

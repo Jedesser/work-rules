@@ -111,9 +111,35 @@ REDIRECT_RE = re.compile(
     r"""(?<![-<>=])(?:\d+|&)?(>{1,2}\|?)\s*("[^"]*"|'[^']*'|[^\s;&|=][^\s;&|]*)""")
 
 
+def _mask_quoted(segment: str) -> str:
+    """Заменяет содержимое кавычек на «x», сохраняя длину и сами кавычки.
+
+    Знак `>` внутри сообщения — обычный текст: `git commit -m "было > стало"`
+    ничего никуда не пишет. Без этого сторож отказывал бы по причине,
+    которой в команде нет, — а такие отказы первым делом выключают.
+    """
+    out = []
+    quote = ""
+    for ch in segment:
+        if quote:
+            out.append(ch if ch == quote else "x")
+            if ch == quote:
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+            out.append(ch)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def _redirect_targets(segment: str, seg_dir: str) -> list[tuple[str, str]]:
     out = []
-    for op, raw in REDIRECT_RE.findall(segment):
+    masked = _mask_quoted(segment)
+    for m in REDIRECT_RE.finditer(masked):
+        op = m.group(1)
+        # Имя берётся из исходной строки: в маске оно затёрто.
+        raw = segment[m.start(2):m.end(2)]
         path = raw.strip("\"'")
         if path and not path.startswith("&"):   # `2>&1` — это поток, не файл
             out.append((f"перенаправление {op}", normalize(path, seg_dir)))

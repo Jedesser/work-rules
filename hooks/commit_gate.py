@@ -57,7 +57,17 @@ def main() -> int:
     for segment, seg_dir in segments:
         tokens = G.tokenize(segment)
         parsed = G.parse_git(tokens, seg_dir)
-        if not parsed or parsed.get("subcommand") != "commit":
+        if not parsed:
+            continue
+        if parsed.get("subcommand") == G.SHELL_ALIAS:
+            # За псевдонимом-оболочкой может стоять коммит, и проверить это
+            # нечем. Пропускать значит отдавать гейт за одну строку конфига.
+            return G.block(
+                "🛑 Гейт коммита: за псевдонимом стоит команда оболочки — что "
+                "именно выполнится, проверке не видно.\n"
+                "Напишите команду явно, тогда её можно проверить."
+            )
+        if parsed.get("subcommand") != "commit":
             continue
 
         # Переадресация дерева — отказ без разбирательств.

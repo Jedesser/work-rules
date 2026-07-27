@@ -87,7 +87,12 @@ DEFAULT_CONFIG: dict = {
     },
 
     # Команды, для которых обязателен внешний потолок по времени.
-    "require_timeout_for": [r"\bgo test\b", r"\bpytest\b", r"\bnpm (run )?test\b"],
+    # Список должен покрывать НЕ МЕНЬШЕ, чем образцовый конфиг: при ошибке в
+    # пользовательском конфиге проверки откатываются сюда, и «умолчания
+    # слабее примера» означало бы, что одна лишняя запятая тихо снимает слой.
+    "require_timeout_for": [r"\bgo test\b", r"\bpytest\b", r"python[0-9.]* -m pytest\b",
+                            r"(poetry|pipenv|uv|pdm|hatch) run .*\bpytest\b",
+                            r"\bnpm (run )?test\b", r"\bcargo test\b"],
     # Команды, запрещённые на машине разработки (их место — в CI).
     "forbidden_local_commands": [],
     # Переменная-эвакуационный выход для предыдущего пункта.
@@ -95,7 +100,8 @@ DEFAULT_CONFIG: dict = {
 
     # Как выглядит создание PR и его мерж в вашем CLI.
     "pr_create_patterns": [r"\bgh pr create\b", r"\bglab mr create\b"],
-    "pr_merge_patterns": [r"\bgh pr merge\b", r"\bglab mr merge\b"],
+    "pr_merge_patterns": [r"\bgh pr merge\b", r"\bglab mr merge\b",
+                          r"\bgh api\b.*\bpulls/\d+/merge\b"],
     # Ветки, освобождённые от требования «сначала задача».
     "issue_exempt_branch_prefixes": ["hotfix/"],
     "issue_link_regex": r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?:\s*:|\s+)\s*(?:[\w.-]+/[\w.-]+)?#\d+",
@@ -1059,12 +1065,21 @@ def parse_git(tokens: list[str], cwd: str = "") -> dict | None:
 INLINE_ALIAS_RE = re.compile(r"^alias\.([^=]+)=(.*)$")
 
 
+# Подкоманда, за которой стоит команда оболочки. Имя намеренно не может
+# совпасть с настоящей подкомандой git — гейты сверяются именно с ним.
+SHELL_ALIAS = "!shell-alias"
+
+
 def resolve_alias(sub: str, globals_seen: list[str], cwd: str) -> tuple[str, list[str]]:
     """Настоящая подкоманда за псевдонимом и его собственные аргументы.
 
     Возвращает исходное имя, если это не псевдоним, — тогда ничего не меняется.
+
     Псевдоним-команда оболочки (`!sh -c …`) не раскрывается: за ним может быть
     что угодно, и притворяться, что мы это разобрали, хуже, чем не разбирать.
+    Но «не разобрали» не значит «пропустили»: возвращается маркер
+    SHELL_ALIAS, и гейт отказывает — иначе `git -c alias.x='!git push
+    --force' x` снимал бы разом все запреты одной строкой.
     """
     if sub in KNOWN_GIT_SUBCOMMANDS:
         return sub, []
@@ -1077,7 +1092,9 @@ def resolve_alias(sub: str, globals_seen: list[str], cwd: str) -> tuple[str, lis
         code, out = git(["config", "--get", f"alias.{sub}"], cwd)
         if code == 0:
             expansion = out.strip()
-    if not expansion or expansion.startswith("!"):
+    if expansion.startswith("!"):
+        return SHELL_ALIAS, []
+    if not expansion:
         return sub, []
     parts = tokenize(expansion)
     return (parts[0], parts[1:]) if parts else (sub, [])

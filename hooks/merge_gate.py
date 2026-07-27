@@ -68,6 +68,10 @@ API_PR_RE = re.compile(r"\bpulls/(\d+)/merge\b")
 # Нераскрытая подстановка — цель, которую нельзя проверить в принципе.
 UNRESOLVED_RE = re.compile(r"[$`]")
 
+# Отличает «у ветки нет PR» (сверять нечего) от «спросить не получилось»
+# (сверка не выполнена — отказ). Оба случая иначе выглядели бы как None.
+UNKNOWN_HEAD = ("", "")
+
 
 def merge_target(tokens: list[str]) -> str | None:
     """Что именно велено слить: номер, ссылка ИЛИ ИМЯ ВЕТКИ.
@@ -163,6 +167,16 @@ def check_tip(work_dir: str, resolved: tuple[str, str] | None) -> int:
     Ветка может быть та самая, а вершина — чужая: другая копия успела
     запушить, и расписки описывают дифф, которого в PR уже нет.
     """
+    if resolved is UNKNOWN_HEAD:
+        # Не «PR не найден», а «спросить не получилось». Разница существенная:
+        # молча пропускать значит отдавать проверку любому сбою сети, а это
+        # граница попадания кода в основную ветку.
+        return G.block(
+            "🛑 Гейт мержа: не удалось выяснить вершину ветки PR.\n\n"
+            "Проверка сверяет её с проверенной здесь копией: другая копия могла "
+            "запушить после ревью, и тогда сольётся не то, что смотрели.\n\n"
+            "Проверьте доступ к хостингу (`gh auth status`) и повторите."
+        )
     if not resolved:
         return 0
     _code, local = G.git(["rev-parse", "HEAD"], work_dir)
@@ -204,7 +218,12 @@ def _pr_head(target: str, work_dir: str) -> tuple[str, str] | None:
     except (OSError, subprocess.SubprocessError):
         return None
     parts = proc.stdout.split()
-    return (parts[0], parts[1]) if proc.returncode == 0 and len(parts) == 2 else None
+    if proc.returncode == 0 and len(parts) == 2:
+        return parts[0], parts[1]
+    if not target and "no pull requests found" in proc.stderr.lower():
+        # У ветки просто нет PR — сверять нечего, это не сбой.
+        return None
+    return None if target else UNKNOWN_HEAD
 
 
 def check_tree(work_dir: str, command: str, cfg: dict) -> int:

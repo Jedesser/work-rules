@@ -208,6 +208,15 @@ def check_git(parsed: dict, main_branch: str, work_dir) -> str | None:
     sub = parsed.get("subcommand")
     args = parsed.get("args", [])
 
+    if sub == G.SHELL_ALIAS:
+        return (
+            "🛑 За псевдонимом стоит команда оболочки — что именно выполнится, "
+            "проверке не видно.\n"
+            "Пропускать её значит снимать все запреты разом одной строкой вида "
+            "`git -c alias.x='!git push --force' x`.\n"
+            "Напишите команду явно."
+        )
+
     if sub == "rebase":
         return (
             "🛑 `git rebase` запрещён.\n"
