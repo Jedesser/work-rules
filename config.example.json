@@ -1,0 +1,111 @@
+{
+  "_comment": [
+    "Копия этого файла кладётся в <корень проекта>/.claude/gates.config.json.",
+    "Здесь настраивается ВСЁ, что специфично для проекта: пути, пороги, ревьюеры.",
+    "В самих хуках проектных строк нет намеренно — иначе перенос в другой",
+    "репозиторий превращается в правку десяти файлов, и списки разъезжаются.",
+    "",
+    "Главное правило при заполнении: критические пути и красная зона проверяются",
+    "по РЕАЛЬНОМУ дереву репозитория, а не пишутся по памяти. Список, написанный",
+    "по догадке об именах каталогов, однажды не совпал ни с чем — и критичный код",
+    "месяцами шёл мимо положенного ревью, при том что защита выглядела рабочей."
+  ],
+
+  "base_ref": "origin/main",
+  "main_branch": "main",
+
+  "shared_checkout": "/absolute/path/to/shared/checkout",
+
+  "receipt_fresh_seconds": 7200,
+
+  "commit_gate": { "max_files": 5 },
+  "merge_gate": { "max_files": 5, "max_additions": 200 },
+
+  "critical_paths": [
+    "^\\.github/workflows/",
+    "(^|/)k8s/",
+    "(^|/)(Dockerfile|docker-compose\\.ya?ml)$",
+    "(^|/)migrations?/",
+    "(^|/)(main|app|server)\\.(py|go|ts|js)$"
+  ],
+
+  "red_zone_paths": [
+    "(^|/)auth[a-z]*/",
+    "(^|/)payment[a-z]*/",
+    "(^|/)billing[a-z]*/",
+    "(^|/)(entitlement|subscription)[a-z]*/",
+    "(^|/)(session|token|password)[a-z]*/"
+  ],
+
+  "_reviewers_comment": [
+    "Имя ревьюера здесь — это имя файла в agents/ без расширения. В комплекте",
+    "их три: change-reviewer, critical-zone-reviewer, ci-watcher. Пока брифа с",
+    "таким именем нет, требование к нему выполнить нечем: гейт будет отказывать",
+    "и обойти его будет нечем. Поэтому строки by_path ниже закомментированы —",
+    "раскомментируйте ту, под которую написали своего ревьюера.",
+    "Расписка засчитывается, когда подагент вызван с этим именем в subagent_type",
+    "либо его бриф начинается строкой: You are the `<имя>` subagent"
+  ],
+  "reviewers": {
+    "always": ["change-reviewer"],
+    "by_path": [],
+    "_by_path_examples": [
+      { "pattern": "\\.(go|rs|java|kt)$", "reviewer": "language-reviewer" },
+      { "pattern": "(^|/)migrations?/", "reviewer": "migration-reviewer" },
+      { "pattern": "^(frontend|web|ui)/", "reviewer": "pattern-reviewer" }
+    ],
+    "red_zone": "critical-zone-reviewer"
+  },
+
+  "_patterns_comment": [
+    "Все шаблоны ниже сверяются С НАЧАЛА команды сегмента, уже очищенной от",
+    "приставок переменных и обёрток (env, sudo, timeout, nice) и от пути к файлу.",
+    "Поэтому `\\bpytest\\b` поймает `pytest -q`, но НЕ поймает `python -m pytest`:",
+    "это другое начало строки, и его нужно перечислить отдельно. Проверьте, что",
+    "перечислены все записи, которыми команду реально запускают у вас."
+  ],
+  "require_timeout_for": [
+    "\\bgo test\\b",
+    "\\bpytest\\b",
+    "python[0-9.]* -m pytest\\b",
+    "(poetry|pipenv|uv|pdm|hatch) run .*\\bpytest\\b",
+    "\\bnpm (run )?test\\b",
+    "\\bcargo test\\b"
+  ],
+
+  "forbidden_local_commands": [
+    "\\bnpm run build\\b",
+    "\\bnext build\\b"
+  ],
+  "forbidden_local_escape_env": "HEAVY_BUILD_OK",
+
+  "pr_create_patterns": ["\\bgh pr create\\b", "\\bglab mr create\\b"],
+  "pr_merge_patterns": [
+    "\\bgh pr merge\\b",
+    "\\bglab mr merge\\b",
+    "\\bgh api\\b.*\\bpulls/\\d+/merge\\b"
+  ],
+  "issue_exempt_branch_prefixes": ["hotfix/"],
+  "issue_gate_min_files": 2,
+  "issue_link_regex": "\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?:\\s*:|\\s+)\\s*(?:[\\w.-]+/[\\w.-]+)?#\\d+",
+
+  "plan": {
+    "enabled": false,
+    "dir": "docs/plans",
+    "min_files": 2,
+    "status_patterns": [
+      "^Статус: согласован владельцем \\d{4}-\\d{2}-\\d{2}$",
+      "^Статус: технический — согласование не требуется$"
+    ]
+  },
+
+  "_timeouts_comment": [
+    "Потолки на вызовы git. Держите их согласованными с таймаутами, с которыми",
+    "перехватчики зарегистрированы в settings.json: если рантайм убьёт хук раньше,",
+    "чем тот успеет ответить, действие будет РАЗРЕШЕНО — и гейт, объявленный",
+    "падающим закрыто, окажется падающим открыто. Соотношение проверяет",
+    "ci/check_gates_consistency.py."
+  ],
+  "git_timeout": 5,
+  "git_diff_timeout": 15
+}
