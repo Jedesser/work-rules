@@ -174,6 +174,14 @@ def _refspec_targets(refspecs: list[str], current: str) -> tuple[list[str], bool
     return targets, forced
 
 
+def _first_opt(args: list[str], *names: str) -> str:
+    """Первый аргумент, узнанный как один из этих флагов (для текста отказа)."""
+    for a in args:
+        if any(G.is_opt(a, n) for n in names):
+            return a
+    return names[0]
+
+
 def _has_letter(tok: str, letter: str) -> bool:
     """Есть ли буква среди ОДНОБУКВЕННЫХ флагов связки: `-fu`, `-Av`, `-f`."""
     return tok.startswith("-") and not tok.startswith("--") and letter in tok[1:]
@@ -245,7 +253,7 @@ def check_git(parsed: dict, main_branch: str, work_dir) -> str | None:
         # `--all` / `--mirror` отправляют все ветки разом, включая основную.
         if any(G.is_opt(a, "--all") or G.is_opt(a, "--mirror") for a in args):
             return (
-                f"🛑 `git push {[a for a in args if a in ('--all', '--mirror')][0]}` запрещён — "
+                f"🛑 `git push {_first_opt(args, '--all', '--mirror')}` запрещён — "
                 f"он отправляет все ветки разом, в том числе `{main_branch}`.\n"
                 "Всё попадает в основную ветку только через PR и его проверки."
             )
@@ -310,9 +318,12 @@ def check_rm(tokens: list[str]) -> str | None:
         letters = set()
         for f in flags:
             if f.startswith("--"):
-                if f == "--recursive":
+                # coreutils тоже понимает однозначное сокращение: `rm --recu
+                # --fo` удаляет ровно так же, как `rm -rf`, и дословное
+                # сравнение пропускало флагманский запрет за три символа.
+                if G.is_opt(f, "--recursive") or G.is_opt(f, "--dir"):
                     letters.add("r")
-                if f == "--force":
+                if G.is_opt(f, "--force"):
                     letters.add("f")
             else:
                 letters.update(f[1:].lower())

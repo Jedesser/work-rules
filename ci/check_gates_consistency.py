@@ -909,7 +909,30 @@ def main() -> int:
                 "tool_name": "Bash", "cwd": str(repo),
                 "tool_input": {"command": cmd}}, repo)
             check(f"сокращённый флаг тоже запрещён: {cmd}", code == 2, f"вернул {code}")
-        for cmd in ("git commit --al -m x", "git commit --pathspec-from-fi=paths -m x"):
+        for cmd in ("git commit --amen -m x",):
+            code, _o, _e = run_hook("guard_bash.py", {
+                "tool_name": "Bash", "cwd": str(repo),
+                "tool_input": {"command": cmd}}, repo)
+            check(f"сокращение, которое git принимает: {cmd}", code == 2, f"вернул {code}")
+        # Тот же приём в coreutils: `rm --recu --fo` удаляет так же, как `rm -rf`.
+        for cmd in ("rm --recu --fo /tmp/x", "rm -r --fo /tmp/x", "rm --recursive --f /tmp/x"):
+            code, _o, _e = run_hook("guard_bash.py", {
+                "tool_name": "Bash", "cwd": str(repo),
+                "tool_input": {"command": cmd}}, repo)
+            check(f"сокращённые флаги rm тоже запрещены: {cmd}", code == 2, f"вернул {code}")
+        # Отказ должен объяснять причину, а не падать на собственном сообщении.
+        code, _o, err = run_hook("guard_bash.py", {
+            "tool_name": "Bash", "cwd": str(repo),
+            "tool_input": {"command": "git push --mir"}}, repo)
+        check("отказ на сокращённый --mirror объясняет причину",
+              code == 2 and "все ветки" in err, err[:120])
+        # `-p` берёт содержимое из рабочего дерева мимо индекса — как и `-a`.
+        for cmd in ("git commit -p -m x", "git commit --interact -m x"):
+            code, _o, _e = run_hook("commit_gate.py", {
+                "tool_name": "Bash", "cwd": str(allflag),
+                "tool_input": {"command": cmd}}, allflag)
+            check(f"коммит мимо индекса виден гейту: {cmd}", code == 2, f"вернул {code}")
+        for cmd in ("git commit --pathspec-from-fi=paths -m x",):
             code, _o, _e = run_hook("commit_gate.py", {
                 "tool_name": "Bash", "cwd": str(allflag),
                 "tool_input": {"command": cmd}}, allflag)

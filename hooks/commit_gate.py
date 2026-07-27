@@ -177,7 +177,7 @@ def _advance(args: list[str], i: int) -> int:
 
 
 def commits_all(args: list[str]) -> bool:
-    """Есть ли у `git commit` флаг «взять всё изменённое» — в любом написании.
+    """Есть ли у `git commit` флаг, берущий содержимое из рабочего дерева.
 
     Слитные формы (`-am`, `-va`) встречаются чаще раздельных, поэтому проверка
     идёт по буквам, а не по точному совпадению токена.
@@ -192,9 +192,12 @@ def commits_all(args: list[str]) -> bool:
         tok = args[i]
         if tok == "--":
             break
-        if G.is_opt(tok, "--all"):
+        # `-p`/`-i` — третья запись того же: содержимое берётся из рабочего
+        # дерева, индекс при этом может быть пуст, и гейт бы просто спал.
+        if any(G.is_opt(tok, n) for n in ("--all", "--patch", "--interactive")):
             return True
-        if tok.startswith("-") and tok != "-" and not tok.startswith("--") and "a" in tok[1:]:
+        if (tok.startswith("-") and tok != "-" and not tok.startswith("--")
+                and any(ch in tok[1:] for ch in "api")):
             return True
         if not tok.startswith("-") or tok == "-":
             # Первое непозиционное слово — путь; дальше флагов «взять всё» нет.
