@@ -216,7 +216,10 @@ def _pr_head(target: str, work_dir: str) -> tuple[str, str] | None:
             cwd=work_dir, capture_output=True, text=True, timeout=20,
         )
     except (OSError, subprocess.SubprocessError):
-        return None
+        # Зависший `gh` — самая частая форма «спросить не получилось»:
+        # тайм-аут это тоже SubprocessError, и вернуть здесь None значило бы
+        # молча отменить сверку ровно на плохой сети.
+        return None if target else UNKNOWN_HEAD
     parts = proc.stdout.split()
     if proc.returncode == 0 and len(parts) == 2:
         return parts[0], parts[1]

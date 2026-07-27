@@ -295,6 +295,30 @@ def main() -> int:
             "tool_name": "Bash", "cwd": str(alias_repo),
             "tool_input": {"command": "git pp origin main"}}, alias_repo)
         check("псевдоним-оболочка из конфига тоже отклоняется", code == 2, f"вернул {code}")
+        # Цепочка: git разворачивает псевдоним псевдонима до конца, и одна
+        # лишняя ступень возвращала бы все запреты обратно.
+        git(["config", "alias.qq", "pp2"], alias_repo)
+        git(["config", "alias.pp2", "push"], alias_repo)
+        code, _o, err = run_hook("guard_bash.py", {
+            "tool_name": "Bash", "cwd": str(alias_repo),
+            "tool_input": {"command": "git qq --force origin main"}}, alias_repo)
+        check("цепочка псевдонимов разворачивается до конца", code == 2, f"вернул {code}")
+        # …а безобидное сокращение работать не мешает: отказ на КАЖДЫЙ `!`
+        # выключают в первый же день, вместе со всем слоем.
+        git(["config", "alias.lg", "!git log --oneline"], alias_repo)
+        for hook in ("guard_bash.py", "commit_gate.py"):
+            code, _o, err = run_hook(hook, {
+                "tool_name": "Bash", "cwd": str(alias_repo),
+                "tool_input": {"command": "git lg -5"}}, alias_repo)
+            check(f"читающий псевдоним-оболочка не мешает работе ({hook})",
+                  code == 0, f"вернул {code}: {err[:120]}")
+        # А тот же вид записи с запрещённой командой внутри — отказ.
+        git(["config", "alias.ff", "!git push --force"], alias_repo)
+        code, _o, err = run_hook("guard_bash.py", {
+            "tool_name": "Bash", "cwd": str(alias_repo),
+            "tool_input": {"command": "git ff origin main"}}, alias_repo)
+        check("запрещённая команда внутри псевдонима-оболочки видна", code == 2,
+              f"вернул {code}")
 
         # Сообщение, начинающееся с дефиса, — не флаг «взять всё».
         code, _o, _e = run_hook("commit_gate.py", {
@@ -496,7 +520,11 @@ def main() -> int:
         sys.path.insert(0, str(HOOKS / "lib"))
         import gatelib as GL  # noqa: E402
         example = json.loads((ROOT / "config.example.json").read_text(encoding="utf-8"))
-        for key in ("pr_merge_patterns", "pr_create_patterns", "require_timeout_for"):
+        # red_zone_paths, shared_checkout и forbidden_local_commands в
+        # умолчаниях намеренно пусты — они про конкретный проект, и общего
+        # значения у них нет. Остальные списки обязаны совпадать.
+        for key in ("pr_merge_patterns", "pr_create_patterns", "require_timeout_for",
+                    "critical_paths"):
             missing = set(example.get(key, [])) - set(GL.DEFAULT_CONFIG.get(key, []))
             check(f"умолчания не слабее примера: {key}", not missing, f"нет: {missing}")
         # Явно названный PR: гейт считает дифф по ТЕКУЩЕЙ ветке, поэтому обязан
@@ -571,6 +599,17 @@ def main() -> int:
             "tool_input": {"command": "MERGE_REVIEW_DONE=1 gh pr merge --merge"}},
             tip, fake_path)
         check("отсутствие PR у ветки не считается сбоем", code == 0, err[:200])
+        # Резолвер не запустился вовсе (в жизни это чаще всего зависание и
+        # тайм-аут) — тот же случай «спросить не получилось», и он обязан
+        # приводить к отказу, а не к тихому пропуску.
+        gh.write_text("#!/nonexistent/interpreter\n")
+        gh.chmod(0o755)
+        code, _o, err = run_hook("merge_gate.py", {
+            "tool_name": "Bash", "cwd": str(tip),
+            "tool_input": {"command": "MERGE_REVIEW_DONE=1 gh pr merge --merge"}},
+            tip, fake_path)
+        check("несработавший резолвер не пропускает мерж",
+              code == 2 and "вершину ветки PR" in err, f"вернул {code}: {err[:160]}")
         write_config(repo)
 
         print("\n8. Предполётная проверка ревьюера")
@@ -959,6 +998,9 @@ def main() -> int:
             # Знак «больше» внутри кавычек — текст, а не перенаправление.
             ("знак больше в сообщении коммита", 'git commit -m "было > стало"', shared, 0),
             ("знак больше в тексте echo", 'echo "3 > 2"', shared, 0),
+            # …но экранированная кавычка кавычку не открывает, и запись
+            # за ней — настоящая.
+            ("экранированная кавычка не прячет запись", f"echo \\' > {shared}/x", mine, 2),
         ):
             code, _o, err = run_hook("worktree_guard.py", {
                 "tool_name": "Bash", "cwd": str(cwd),

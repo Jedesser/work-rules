@@ -67,6 +67,7 @@ DEFAULT_CONFIG: dict = {
         r"(^|/)k8s/",
         r"(^|/)(Dockerfile|docker-compose\.ya?ml)$",
         r"(^|/)migrations?/",
+        r"(^|/)(main|app|server)\.(py|go|ts|js)$",
     ],
 
     # Красная зона: подмножество критических путей, где цена пропущенной
@@ -1069,6 +1070,14 @@ INLINE_ALIAS_RE = re.compile(r"^alias\.([^=]+)=(.*)$")
 # совпасть с настоящей подкомандой git — гейты сверяются именно с ним.
 SHELL_ALIAS = "!shell-alias"
 
+# Глубина разворачивания цепочки псевдонимов. Своё число, а не общий предел
+# обёрток: цена ступени здесь — вызов `git config`, и он дороже.
+MAX_ALIAS_DEPTH = 10
+
+# Подстановки и позиционные параметры в теле псевдонима: что именно
+# выполнится, зависит от аргументов вызова, и разобрать это заранее нельзя.
+UNPARSEABLE_ALIAS_RE = re.compile(r"[$`;|&]|\$\{|\$@|\$\d")
+
 
 def resolve_alias(sub: str, globals_seen: list[str], cwd: str) -> tuple[str, list[str]]:
     """Настоящая подкоманда за псевдонимом и его собственные аргументы.
@@ -1081,23 +1090,44 @@ def resolve_alias(sub: str, globals_seen: list[str], cwd: str) -> tuple[str, lis
     SHELL_ALIAS, и гейт отказывает — иначе `git -c alias.x='!git push
     --force' x` снимал бы разом все запреты одной строкой.
     """
-    if sub in KNOWN_GIT_SUBCOMMANDS:
-        return sub, []
-    expansion = ""
-    for tok in globals_seen:
-        m = INLINE_ALIAS_RE.match(tok)
-        if m and m.group(1) == sub:
-            expansion = m.group(2)
-    if not expansion and cwd:
-        code, out = git(["config", "--get", f"alias.{sub}"], cwd)
-        if code == 0:
-            expansion = out.strip()
-    if expansion.startswith("!"):
-        return SHELL_ALIAS, []
-    if not expansion:
-        return sub, []
-    parts = tokenize(expansion)
-    return (parts[0], parts[1:]) if parts else (sub, [])
+    extra: list[str] = []
+    seen: set[str] = set()
+    # Псевдоним может ссылаться на псевдоним — git разворачивает цепочку до
+    # конца, и одна лишняя ступень (`qq` → `pp` → `push`) вернула бы все
+    # запреты обратно. `seen` защищает от кольца, которое git ловит сам.
+    for _ in range(MAX_ALIAS_DEPTH):
+        if sub in KNOWN_GIT_SUBCOMMANDS or sub in seen:
+            return sub, extra
+        seen.add(sub)
+        expansion = ""
+        for tok in globals_seen:
+            m = INLINE_ALIAS_RE.match(tok)
+            if m and m.group(1) == sub:
+                expansion = m.group(2)
+        if not expansion and cwd:
+            code, out = git(["config", "--get", f"alias.{sub}"], cwd)
+            if code == 0:
+                expansion = out.strip()
+        if not expansion:
+            return sub, extra
+        if expansion.startswith("!"):
+            # Тело — команда оболочки. Если это простой вызов git без
+            # подстановок, его можно разобрать как обычную команду: иначе
+            # безобидные сокращения вроде `!git log --oneline` блокировали бы
+            # работу, а такие отказы первым делом выключают. Всё остальное
+            # честно помечается непроверяемым.
+            body = expansion[1:].strip()
+            parts = tokenize(body)
+            if (parts and os.path.basename(parts[0]) == "git"
+                    and not UNPARSEABLE_ALIAS_RE.search(body)):
+                sub, extra = (parts[1], parts[2:] + extra) if len(parts) > 1 else (SHELL_ALIAS, [])
+                continue
+            return SHELL_ALIAS, []
+        parts = tokenize(expansion)
+        if not parts:
+            return sub, extra
+        sub, extra = parts[0], parts[1:] + extra
+    return sub, extra
 
 
 # Подкоманды, которые точно не псевдонимы: для них вызывать git незачем.

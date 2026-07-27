@@ -120,7 +120,18 @@ def _mask_quoted(segment: str) -> str:
     """
     out = []
     quote = ""
+    escaped = False
     for ch in segment:
+        if escaped:
+            # Экранированная кавычка кавычку не открывает: без этого
+            # `echo \' > файл` съедал бы перенаправление целиком.
+            out.append("x")
+            escaped = False
+            continue
+        if ch == "\\" and quote != "'":
+            out.append(ch)
+            escaped = True
+            continue
         if quote:
             out.append(ch if ch == quote else "x")
             if ch == quote:
