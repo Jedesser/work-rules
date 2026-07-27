@@ -841,7 +841,12 @@ def peel_wrappers(tokens: list[str]) -> tuple[list[str], dict[str, str]]:
     """
     out = list(tokens)
     collected: dict[str, str] = {}
-    for _ in range(MAX_EXPAND_DEPTH):
+    # Верхняя граница — длина списка, а не MAX_EXPAND_DEPTH: каждый проход
+    # либо возвращает результат, либо укорачивает список хотя бы на слово,
+    # так что зациклиться нельзя. Ограничение тремя проходами означало, что
+    # `timeout 600 nice -n 10 env FOO=1 git push --force` остаётся
+    # неразобранным — то есть проходит мимо ВСЕХ запретов сразу.
+    for _ in range(len(tokens) + 1):
         out = strip_shell_syntax(out)
         out, env = strip_env_prefix(out)
         collected.update(env)
@@ -927,7 +932,16 @@ def segments_with_dirs(command: str, base_dir: str) -> list[tuple[str, str]]:
     и `cd ../соседняя-копия && git commit` он проверяет по дереву сессии,
     то есть выносит вердикт про совсем другой дифф. А `cd <копия> && git
     commit` — обычный способ добраться до соседней рабочей копии, не экзотика.
+
+    Разворачивание вложенного тоже каталого-осведомлённое: `bash -c "cd
+    <копия> && git commit"` — это тот же переход, просто записанный через
+    строку-команду, и считать его выполненным в каталоге сессии значит
+    оставить дыру ровно там, где её закрывали снаружи.
     """
+    return _walk_with_dirs(command, base_dir, 0)
+
+
+def _walk_with_dirs(command: str, base_dir: str, depth: int) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     current = base_dir
     for top in split_segments(command):
@@ -939,8 +953,21 @@ def segments_with_dirs(command: str, base_dir: str) -> list[tuple[str, str]]:
                 if os.path.isdir(target):
                     current = os.path.realpath(target)
             continue
-        for seg in expand_segments(top):
-            out.append((seg, current))
+        out.append((top, current))
+        if depth >= MAX_EXPAND_DEPTH or not peeled:
+            continue
+        exe = os.path.basename(peeled[0])
+        if exe in SHELL_COMMANDS:
+            for idx, tok in enumerate(peeled[1:], start=1):
+                if SHELL_C_RE.match(tok) and idx + 1 < len(peeled):
+                    out.extend(_walk_with_dirs(peeled[idx + 1], current, depth + 1))
+                    break
+        elif exe == "eval":
+            out.extend(_walk_with_dirs(" ".join(peeled[1:]), current, depth + 1))
+        for m in SUBSHELL_RE.finditer(top):
+            inner = m.group(1) or m.group(2) or ""
+            if inner.strip():
+                out.extend(_walk_with_dirs(inner, current, depth + 1))
     return out
 
 
