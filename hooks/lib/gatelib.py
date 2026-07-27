@@ -1076,7 +1076,23 @@ MAX_ALIAS_DEPTH = 10
 
 # Подстановки и позиционные параметры в теле псевдонима: что именно
 # выполнится, зависит от аргументов вызова, и разобрать это заранее нельзя.
-UNPARSEABLE_ALIAS_RE = re.compile(r"[$`;|&]|\$\{|\$@|\$\d")
+# Перевод строки здесь так же важен, как `;`: тело из двух строк — это две
+# команды, и разобрать его как одну значит увидеть только первую.
+UNPARSEABLE_ALIAS_RE = re.compile(r"[$`;|&\n\r<>()#]")
+
+
+def _skip_git_globals(tokens: list[str]) -> tuple[str | None, list[str]]:
+    """Первое слово-подкоманда после глобальных флагов git и остаток за ней."""
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if not tok.startswith("-"):
+            return tok, tokens[i + 1:]
+        if tok.startswith("--") and "=" in tok:
+            i += 1
+            continue
+        i += 2 if tok in GIT_FLAGS_WITH_VALUE else 1
+    return None, []
 
 
 def resolve_alias(sub: str, globals_seen: list[str], cwd: str) -> tuple[str, list[str]]:
@@ -1120,7 +1136,13 @@ def resolve_alias(sub: str, globals_seen: list[str], cwd: str) -> tuple[str, lis
             parts = tokenize(body)
             if (parts and os.path.basename(parts[0]) == "git"
                     and not UNPARSEABLE_ALIAS_RE.search(body)):
-                sub, extra = (parts[1], parts[2:] + extra) if len(parts) > 1 else (SHELL_ALIAS, [])
+                # Подкоманду ищем так же, как в обычном вызове: перед ней могут
+                # стоять глобальные флаги, и `!git -C /tmp push --force`
+                # позиционным `parts[1]` читался бы как подкоманда `-C`.
+                nxt, rest = _skip_git_globals(parts[1:])
+                if nxt is None:
+                    return SHELL_ALIAS, []
+                sub, extra = nxt, rest + extra
                 continue
             return SHELL_ALIAS, []
         parts = tokenize(expansion)

@@ -319,6 +319,17 @@ def main() -> int:
             "tool_input": {"command": "git ff origin main"}}, alias_repo)
         check("запрещённая команда внутри псевдонима-оболочки видна", code == 2,
               f"вернул {code}")
+        # Две строки в теле — две команды: разобрать как одну значит увидеть
+        # только первую, безобидную. Глобальный флаг перед подкомандой сдвигает
+        # её на позицию вправо — позиционный разбор читал бы `-C` как команду.
+        git(["config", "alias.nl", "!git status\ngit push --force"], alias_repo)
+        git(["config", "alias.dc", "!git -C /tmp push --force"], alias_repo)
+        for name in ("nl", "dc"):
+            code, _o, err = run_hook("guard_bash.py", {
+                "tool_name": "Bash", "cwd": str(alias_repo),
+                "tool_input": {"command": f"git {name}"}}, alias_repo)
+            check(f"тело псевдонима не прячет команду (alias.{name})", code == 2,
+                  f"вернул {code}")
 
         # Сообщение, начинающееся с дефиса, — не флаг «взять всё».
         code, _o, _e = run_hook("commit_gate.py", {
