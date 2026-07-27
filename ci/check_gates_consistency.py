@@ -936,6 +936,39 @@ def main() -> int:
             "tool_input": {"command": "git add -u && git commit -m y"}}, addcommit)
         check("`git add -u` и коммит в одной команде проверяются",
               code == 2 and "critical/a.txt" in err, f"вернул {code}: {err[:160]}")
+        # Каталог — тоже область добавления: точное сравнение с именами
+        # файлов не совпадает ни с чем, и гейт бы просто спал.
+        (addcommit / "src").mkdir()
+        for i in range(6):
+            (addcommit / "src" / f"f{i}.txt").write_text("x\n")
+        code, _o, err = run_hook("commit_gate.py", {
+            "tool_name": "Bash", "cwd": str(addcommit),
+            "tool_input": {"command": "git add src/ && git commit -m x"}}, addcommit)
+        check("добавление каталога и коммит проверяются", code == 2, f"вернул {code}")
+        # Область неизвестна + обход по расписке + неотслеживаемые файлы рядом:
+        # расписка выписана на дифф без них, освобождать эту форму нельзя.
+        run_hook("subagent_receipt.py", reviewer_payload(addcommit), addcommit)
+        code, _o, err = run_hook("commit_gate.py", {
+            "tool_name": "Bash", "cwd": str(addcommit),
+            "tool_input": {"command": "git add -A && REVIEW_DONE=1 git commit -m x"}},
+            addcommit)
+        check("добавление без списка не освобождается распиской", code == 2,
+              f"вернул {code}: {err[:140]}")
+        # А `-u` неотслеживаемые файлы не берёт — считать их значит отказывать
+        # по файлам, которых в коммите не будет.
+        clean_u = make_repo(tmp, "trackedonly")
+        write_config(clean_u)
+        (clean_u / "one.txt").write_text("v1\n")
+        git(["add", "one.txt"], clean_u)
+        git(["commit", "-qm", "one"], clean_u)
+        (clean_u / "one.txt").write_text("v2\n")
+        for i in range(6):
+            (clean_u / f"junk{i}.txt").write_text("x\n")
+        code, _o, err = run_hook("commit_gate.py", {
+            "tool_name": "Bash", "cwd": str(clean_u),
+            "tool_input": {"command": "git add -u && git commit -m x"}}, clean_u)
+        check("`git add -u` не считает неотслеживаемые файлы", code == 0, err[:160])
+
         # Добавление ПОСЛЕ коммита в него не попадает — засчитывать его значит
         # отказывать по файлу, которого в этом коммите не будет.
         (addcommit / "critical" / "b.txt").write_text("z\n")

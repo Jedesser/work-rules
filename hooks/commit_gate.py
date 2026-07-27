@@ -114,8 +114,22 @@ def main() -> int:
         # Сверяется с тем, что реально отличается от последнего коммита:
         # `git add` неизменённого файла ничего в коммит не приносит, а в счёте
         # раздувал бы размер и давал отказ на пустом месте.
-        touched = set(G.uncommitted_files(work_dir)) | set(G.untracked_files(work_dir))
-        planned = touched if ADD_SCOPE_UNKNOWN in adds else set(adds) & touched
+        tracked = set(G.uncommitted_files(work_dir))
+        touched = tracked | set(G.untracked_files(work_dir))
+        planned: set[str] = set()
+        if ADD_SCOPE_UNKNOWN in adds:
+            planned |= touched
+        if ADD_SCOPE_TRACKED in adds:
+            # `-u` берёт только отслеживаемое: считать сюда неотслеживаемые
+            # файлы значит отказывать по файлам, которых в коммите не будет.
+            planned |= tracked
+        for path in adds:
+            if path in (ADD_SCOPE_UNKNOWN, ADD_SCOPE_TRACKED):
+                continue
+            # Путь может быть каталогом: точное сравнение с именами файлов
+            # тогда не совпадает ни с чем, и `git add <каталог> && git commit`
+            # усыплял гейт целиком.
+            planned |= {t for t in touched if t == path or t.startswith(path + "/")}
         if commits_all(args) or has_pathspec(args):
             files = sorted(set(G.uncommitted_files(work_dir)) | set(staged) | planned)
         else:
@@ -137,8 +151,18 @@ def main() -> int:
         if not bypass:
             return G.block(_why_blocked(work_dir, files, big, critical, reviewers, cfg))
 
+        adds_here = pending_adds.get(work_dir, [])
+        if ADD_SCOPE_UNKNOWN in adds_here and G.untracked_files(work_dir):
+            # Область добавления неизвестна, а рядом лежат файлы, которых git
+            # ещё не знает: расписка выписана на дифф без них.
+            return G.block(
+                "🛑 Гейт коммита: `git add` без явного списка вместе с обходом "
+                "`REVIEW_DONE=1`.\n\nЧто попадёт в коммит, проверке не видно, а рядом "
+                "есть неотслеживаемые файлы — расписка описывает дифф без них.\n\n"
+                "Перечислите файлы явно, затем ревью, затем коммит."
+            )
         unseen = unseen_adds(
-            [p for p in pending_adds.get(work_dir, []) if p != ADD_SCOPE_UNKNOWN],
+            [p for p in adds_here if p not in (ADD_SCOPE_UNKNOWN, ADD_SCOPE_TRACKED)],
             work_dir)
         if unseen:
             return G.block(
@@ -243,6 +267,12 @@ def has_pathspec(args: list[str]) -> bool:
     return False
 
 
+# Два РАЗНЫХ признака, и путать их нельзя. «Только отслеживаемое» не может
+# внести файл, которого ревьюер не видел, — его и освобождает проверка
+# «добавляется то, чего в диффе нет». «Область неизвестна» (`git add -A`,
+# пути из файла) означает ровно обратное: внести может что угодно, и
+# освобождать его — значит открыть дыру под валидной распиской.
+ADD_SCOPE_TRACKED = "<всё отслеживаемое>"
 ADD_SCOPE_UNKNOWN = "<весь индекс>"
 # Формы `git add`, которые берут только уже отслеживаемые файлы и по
 # определению не могут внести в коммит ничего, чего ревьюер не видел.
@@ -274,7 +304,10 @@ def collect_adds(segments: list[tuple[str, str]], session_dir: str) -> dict[str,
         # ревьюер не видел, — но состав коммита определяет так же, как любой
         # другой add. Раньше такой сегмент выпадал целиком, и `git add -u &&
         # git commit` не проверялся ни по размеру, ни по критическим путям.
-        if is_tracked_only(args) or has_pathspec_file(args):
+        if is_tracked_only(args):
+            out.setdefault(work_dir, []).append(ADD_SCOPE_TRACKED)
+            continue
+        if has_pathspec_file(args):
             out.setdefault(work_dir, []).append(ADD_SCOPE_UNKNOWN)
             continue
         base = G.git_dash_c_dir(parsed, shell_cwd) or shell_cwd or work_dir
