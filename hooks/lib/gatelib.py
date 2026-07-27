@@ -1087,6 +1087,11 @@ def mask_quoted(text: str) -> str:
     Нужно там, где ищут значащие знаки оболочки: `(`, `>` и `#` внутри
     строки формата (`--pretty=format:"%h (%an)"`) — обычный текст, и
     отказывать по ним значит ломать безобидные команды.
+
+    Двойные кавычки НЕ обезвреживают подстановку: `"$(…)"` и обратные
+    кавычки внутри них выполняются, поэтому там они остаются видимыми. И
+    незакрытая кавычка не маскирует остаток строки — иначе ею можно было бы
+    спрятать что угодно; такая строка возвращается как есть.
     """
     out: list[str] = []
     quote = ""
@@ -1101,14 +1106,18 @@ def mask_quoted(text: str) -> str:
             escaped = True
             continue
         if quote:
-            out.append(ch if ch == quote else "x")
             if ch == quote:
+                out.append(ch)
                 quote = ""
+            elif quote == '"' and ch in "$`":
+                out.append(ch)
+            else:
+                out.append("x")
             continue
         if ch in "\"'":
             quote = ch
         out.append(ch)
-    return "".join(out)
+    return text if quote else "".join(out)
 
 
 def _skip_git_globals(tokens: list[str]) -> tuple[str | None, list[str], list[str]]:
@@ -1185,8 +1194,9 @@ def resolve_alias(sub: str, globals_seen: list[str], cwd: str) -> tuple[str, lis
                     return SHELL_ALIAS, []
                 # Флаги тела попадают в тот же список, по которому гейты ищут
                 # `-C` и `-c alias.x=…`: иначе псевдоним прячет и дерево, и
-                # объявленный внутри себя псевдоним.
-                globals_seen[:0] = skipped
+                # объявленный внутри себя псевдоним. В КОНЕЦ, а не в начало:
+                # у git побеждает последний флаг, и тело — последнее слово.
+                globals_seen.extend(skipped)
                 sub, extra = nxt, rest + extra
                 continue
             return SHELL_ALIAS, []

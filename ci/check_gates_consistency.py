@@ -346,6 +346,32 @@ def main() -> int:
             "tool_name": "Bash", "cwd": str(alias_repo),
             "tool_input": {"command": "git inner origin main"}}, alias_repo)
         check("псевдоним внутри тела псевдонима раскрывается", code == 2, f"вернул {code}")
+        # У git побеждает ПОСЛЕДНИЙ флаг, а тело псевдонима идёт последним.
+        # Со встречным флагом у вызова проверка обязана смотреть в дерево тела.
+        code, _o, err = run_hook("commit_gate.py", {
+            "tool_name": "Bash", "cwd": str(alias_repo),
+            "tool_input": {"command": f"git -C {alias_repo} dcommit"}}, alias_repo)
+        check("флаг тела перевешивает встречный флаг вызова",
+              code == 2 and "critical/alias-only.txt" in err, f"вернул {code}: {err[:200]}")
+        code, _o, err = run_hook("guard_bash.py", {
+            "tool_name": "Bash", "cwd": str(alias_repo),
+            "tool_input": {"command": "git -c alias.pp3=log inner origin main"}}, alias_repo)
+        check("псевдоним из тела перевешивает объявленный в вызове", code == 2,
+              f"вернул {code}")
+        # Подстановка внутри ДВОЙНЫХ кавычек выполняется — маска не должна её
+        # прятать, иначе тело с `$(…)` выглядит безобидным разбираемым вызовом.
+        git(["config", "alias.subst", '!git log "$(git push --force origin main)"'],
+            alias_repo)
+        code, _o, err = run_hook("guard_bash.py", {
+            "tool_name": "Bash", "cwd": str(alias_repo),
+            "tool_input": {"command": "git subst"}}, alias_repo)
+        check("подстановка в двойных кавычках не маскируется", code == 2, f"вернул {code}")
+        # Незакрытая кавычка не должна прятать остаток строки.
+        git(["config", "alias.oq", '!git log "не закрыл $(id)'], alias_repo)
+        code, _o, err = run_hook("guard_bash.py", {
+            "tool_name": "Bash", "cwd": str(alias_repo),
+            "tool_input": {"command": "git oq"}}, alias_repo)
+        check("незакрытая кавычка не прячет остаток тела", code == 2, f"вернул {code}")
         # …и при этом знаки оболочки ВНУТРИ кавычек — обычный текст.
         git(["config", "alias.fmt", '!git log --pretty=format:"%h (%an)"'], alias_repo)
         for hook in ("guard_bash.py", "commit_gate.py"):
